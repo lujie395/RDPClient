@@ -1,0 +1,15 @@
+# 构建产物
+build/
+third-party/
+
+# XcodeGen 生成物（由 bootstrap.sh 生成）
+*.xcodeproj
+
+# FreeRDP 源码（由 bootstrap.sh 克隆）
+FreeRDP/
+
+# macOS / Xcode 杂项
+.DS_Store
+xcuserdata/
+*.xcuserstate
+.idea/

@@ -1,0 +1,77 @@
+# 无 Mac 时的云端编译：借 GitHub 的苹果电脑自动打包 IPA
+#
+# 原理：GitHub 提供免费的 macOS 云服务器（公共仓库不限时）。
+# 把本工程推到 GitHub 后，手动触发本工作流，它会：
+#   1. 装 cmake / xcodegen / ldid
+#   2. 跑 bootstrap.sh（克隆 FreeRDP → 编译 OpenSSL/FreeRDP 静态库 → 生成 xcodeproj）
+#   3. 用 xcodebuild 出 Release 包（不做签名）
+#   4. 打包成未签名 IPA，作为 Artifact 供下载
+#
+# 下载到的 IPA 在 Windows 上用 Sideloadly / AltStore 用你自己的
+# Apple ID 签名后即可安装到 iPhone（详见 INSTALL_NO_MAC.md）。
+
+name: Build IPA (unsigned)
+
+on:
+  workflow_dispatch: {}   # 仅手动触发：仓库页 Actions → Build IPA → Run workflow
+
+jobs:
+  build:
+    name: Compile on macOS runner
+    runs-on: macos-15          # 自带 Xcode 16.x（iOS 18 SDK）
+    timeout-minutes: 100
+
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 安装构建工具
+        run: |
+          brew install xcodegen ldid ninja
+          xcodebuild -version
+          cmake --version | head -1
+
+      - name: 编译依赖与工程（bootstrap.sh）
+        run: ./bootstrap.sh
+
+      - name: xcodebuild 编译 Release（不签名）
+        run: |
+          set -o pipefail
+          xcodebuild \
+            -project RDPClient.xcodeproj \
+            -scheme RDPClient \
+            -configuration Release \
+            -destination "generic/platform=iOS" \
+            -derivedDataPath build \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            build 2>&1 | xcbeautify
+
+      - name: 打包未签名 IPA
+        run: |
+          APP="build/Build/Products/Release-iphoneos/RDPClient.app"
+          test -d "$APP" || { echo "未找到编译产物"; exit 1; }
+          rm -rf Payload && mkdir Payload
+          cp -R "$APP" Payload/
+
+          # ldid 伪签名：让 Sideloadly / AltStore 能顺利重签
+          cd Payload/RDPClient.app
+          if [ -d Frameworks ]; then
+            for fw in Frameworks/*.framework; do
+              n="$(basename "$fw" .framework)"
+              [ -f "$fw/$n" ] && ldid -S "$fw/$n" || true
+            done
+          fi
+          ldid -S RDPClient
+          cd ../..
+
+          zip -qry RDPClient-unsigned.ipa Payload
+          ls -lh RDPClient-unsigned.ipa
+
+      - name: 上传 IPA（到本页 Artifacts 下载）
+        uses: actions/upload-artifact@v4
+        with:
+          name: RDPClient-unsigned-ipa
+          path: RDPClient-unsigned.ipa
+          retention-days: 30

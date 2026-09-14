@@ -1,0 +1,62 @@
+# XcodeGen 工程定义
+# 生成：xcodegen generate  →  RDPClient.xcodeproj
+#
+# 说明：
+#   - 静态库目录名带 $(PLATFORM_NAME)（iphoneos / iphonesimulator），
+#     由 scripts/*.sh 产出，让真机与模拟器各自链接各自的库。
+#   - Deployment target 取 iOS 18.0（覆盖 iOS 18.0/18.1/18.2 设备；
+#     用户目标设备为 iOS 18.2，完全兼容）。
+name: RDPClient
+options:
+  bundleIdPrefix: com.rdpclient
+  deploymentTarget:
+    iOS: "18.0"
+  createIntermediateGroups: true
+
+settings:
+  base:
+    SWIFT_VERSION: "5.0"
+    TARGETED_DEVICE_FAMILY: "1,2"          # iPhone + iPad
+    GENERATE_INFOPLIST_FILE: false
+
+targets:
+  RDPClient:
+    type: application
+    platform: iOS
+    sources:
+      - path: RDPClient
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.rdpclient.app
+        MARKETING_VERSION: "1.0.0"
+        CURRENT_PROJECT_VERSION: "1"
+        INFOPLIST_FILE: RDPClient/Info.plist
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME: AccentColor
+        SWIFT_OBJC_BRIDGING_HEADER: RDPClient/Bridge/RDPClient-Bridging-Header.h
+        CODE_SIGN_STYLE: Automatic
+        ENABLE_USER_SCRIPT_SANDBOXING: false
+        OTHER_LDFLAGS: "-lfreerdp -lwinpr -lssl -lcrypto"
+        LIBRARY_SEARCH_PATHS:
+          - "$(SRCROOT)/build/dist-$(PLATFORM_NAME)"
+          - "$(SRCROOT)/third-party/openssl/$(PLATFORM_NAME)/lib"
+        HEADER_SEARCH_PATHS:
+          - "$(SRCROOT)/FreeRDP/include"
+          - "$(SRCROOT)/FreeRDP/winpr/include"
+          - "$(SRCROOT)/build/$(PLATFORM_NAME)/include"
+    dependencies:
+      - sdk: Security.framework
+      - sdk: VideoToolbox.framework
+      - sdk: CoreMedia.framework
+      - sdk: CoreVideo.framework
+      - sdk: Network.framework
+
+schemes:
+  RDPClient:
+    build:
+      targets:
+        RDPClient: all
+    run:
+      config: Debug
+    test:
+      config: Debug
