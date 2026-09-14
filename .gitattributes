@@ -1,2 +1,4 @@
-# Auto detect text files and perform LF normalization
-* text=auto
+# 强制 shell 脚本在 Git 中始终使用 LF 换行，避免 Windows 上传后 bash 无法解析
+*.sh text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf

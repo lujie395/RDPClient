@@ -33,6 +33,8 @@ jobs:
 
       - name: 编译依赖与工程（bootstrap.sh）
         run: |
+          # Windows 上传可能把换行符变成 CRLF，先转回 LF
+          sed -i '' 's/\r$//' bootstrap.sh scripts/*.sh
           chmod +x bootstrap.sh scripts/*.sh
           ./bootstrap.sh
 
