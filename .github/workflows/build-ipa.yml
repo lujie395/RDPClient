@@ -37,6 +37,7 @@ jobs:
       - name: xcodebuild 编译 Release（不签名）
         run: |
           set -o pipefail
+          mkdir -p build/logs
           xcodebuild \
             -project RDPClient.xcodeproj \
             -scheme RDPClient \
@@ -46,7 +47,7 @@ jobs:
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGN_IDENTITY="" \
-            build 2>&1 | xcbeautify
+            build 2>&1 | tee build/logs/xcodebuild.log
 
       - name: 打包未签名 IPA
         run: |
@@ -75,3 +76,12 @@ jobs:
           name: RDPClient-unsigned-ipa
           path: RDPClient-unsigned.ipa
           retention-days: 30
+
+      - name: 上传调试日志（失败时也能下载）
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-logs
+          path: build/logs/*.log
+          retention-days: 30
+          if-no-files-found: ignore
