@@ -58,6 +58,7 @@ build() {
     -DWITH_PCSC=OFF \
     -DWITH_PKCS11=OFF \
     -DWITH_CJSON=OFF \
+    -DWITH_JSON_DISABLED=ON \
     -DFREERDP_IOS_EXTERNAL_SSL_PATH="$ROOT/third-party/openssl/$platform"
   cmake --build "$builddir" --config Release --target freerdp winpr
 
