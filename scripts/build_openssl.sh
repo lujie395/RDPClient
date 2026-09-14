@@ -10,7 +10,7 @@
 # 目录名特意使用 PLATFORM_NAME（iphoneos / iphonesimulator），
 # 与 project.yml 中的 LIBRARY_SEARCH_PATHS 相对应。
 #
-set -euo pipefail
+set -eo pipefail
 
 OPENSSL_VERSION="${OPENSSL_VERSION:-3.3.2}"
 MIN_IOS="${MIN_IOS:-18.0}"

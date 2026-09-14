@@ -31,12 +31,22 @@ jobs:
           xcodebuild -version
           cmake --version | head -1
 
-      - name: 编译依赖与工程（bootstrap.sh）
+      - name: 规范化换行符并设置脚本权限
         run: |
-          # Windows 上传可能把换行符变成 CRLF，先转回 LF
-          sed -i '' 's/\r$//' bootstrap.sh scripts/*.sh
+          # Windows 上传可能把换行符变成 CRLF，导致 bash 解析变量失败。
+          # 用 tr 删除所有 \r，这是最可靠的方式。
+          for f in bootstrap.sh scripts/*.sh; do
+            tr -d '\r' < "$f" > "$f.lf"
+            mv "$f.lf" "$f"
+          done
           chmod +x bootstrap.sh scripts/*.sh
-          ./bootstrap.sh
+          # 验证
+          bash -n bootstrap.sh
+          bash -n scripts/build_openssl.sh
+          bash -n scripts/build_freerdp.sh
+
+      - name: 编译依赖与工程（bootstrap.sh）
+        run: ./bootstrap.sh
 
       - name: xcodebuild 编译 Release（不签名）
         run: |

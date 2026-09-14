@@ -16,7 +16,7 @@
 # 用法：
 #   ./bootstrap.sh
 #
-set -euo pipefail
+set -eo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$ROOT"

@@ -12,7 +12,7 @@
 #   - 关闭所有客户端壳（client/common、client/iOS、SDL），我们自带 SwiftUI 客户端
 #   - 目录名使用 PLATFORM_NAME，与 project.yml 的搜索路径对应
 #
-set -euo pipefail
+set -eo pipefail
 
 MIN_IOS="${MIN_IOS:-18.0}"
 

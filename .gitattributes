@@ -1,4 +1,12 @@
-# 强制 shell 脚本在 Git 中始终使用 LF 换行，避免 Windows 上传后 bash 无法解析
+# 强制所有文本文件在 Git 中始终使用 LF 换行，避免 Windows 上传后 bash 无法解析
+* text=auto eol=lf
 *.sh text eol=lf
 *.yml text eol=lf
 *.yaml text eol=lf
+*.swift text eol=lf
+*.h text eol=lf
+*.mm text eol=lf
+*.md text eol=lf
+*.json text eol=lf
+*.plist text eol=lf
+*.xcprivacy text eol=lf
