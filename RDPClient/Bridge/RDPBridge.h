@@ -72,7 +72,7 @@ FOUNDATION_EXPORT NSString * const RDPBridgeErrorDomain;
                domain:(NSString *)domain
          desktopWidth:(NSUInteger)width
         desktopHeight:(NSUInteger)height
-                error:(NSError **)error;
+                error:(NSError **)error NS_SWIFT_NAME(connectToHost(_:port:username:password:domain:desktopWidth:desktopHeight:));
 
 /// 断开连接（幂等；未连接时调用无副作用）
 - (void)disconnect;
@@ -80,26 +80,26 @@ FOUNDATION_EXPORT NSString * const RDPBridgeErrorDomain;
 // ------------------------- 输入 API -------------------------
 
 /// 鼠标移动（x/y 为远程桌面像素坐标）
-- (void)sendMouseMoveAtX:(NSUInteger)x y:(NSUInteger)y;
+- (void)sendMouseMoveAtX:(NSUInteger)x y:(NSUInteger)y NS_SWIFT_NAME(sendMouseMoveAtX(_:y:));
 
 /// 按下/抬起鼠标按键
-- (void)sendMouseButton:(RDPMouseButton)button down:(BOOL)down x:(NSUInteger)x y:(NSUInteger)y;
+- (void)sendMouseButton:(RDPMouseButton)button down:(BOOL)down x:(NSUInteger)x y:(NSUInteger)y NS_SWIFT_NAME(sendMouseButton(_:down:x:y:));
 
 /// 滚轮。delta 为旋转量：一格 = 120；正值向“上/左”，负值向“下/右”
-- (void)sendScrollVerticalDelta:(NSInteger)delta;
-- (void)sendScrollHorizontalDelta:(NSInteger)delta;
+- (void)sendScrollVerticalDelta:(NSInteger)delta NS_SWIFT_NAME(sendScrollVerticalDelta(_:));
+- (void)sendScrollHorizontalDelta:(NSInteger)delta NS_SWIFT_NAME(sendScrollHorizontalDelta(_:));
 
 /// 发送键盘扫描码事件（控制键、快捷键用）
 /// @param scancode Set-1 扫描码（如 Esc=0x01、Enter=0x1C、Del=0x53）
 /// @param extended 是否为扩展键（方向键/Del/Win 等为 YES）
-- (void)sendKeyScancode:(UInt8)scancode extended:(BOOL)extended down:(BOOL)down;
+- (void)sendKeyScancode:(UInt8)scancode extended:(BOOL)extended down:(BOOL)down NS_SWIFT_NAME(sendKeyScancode(_:extended:down:));
 
 /// 发送 Unicode 字符事件（文本输入用，支持中文）
 /// @param utf16Unit UTF-16 码元（代理对需逐个发送 down+up）
-- (void)sendUnicodeCharacter:(UniChar)utf16Unit down:(BOOL)down;
+- (void)sendUnicodeCharacter:(UniChar)utf16Unit down:(BOOL)down NS_SWIFT_NAME(sendUnicodeCharacter(_:down:));
 
 /// 更新 sticky 修饰键。previous 为变更前状态；新增的按下、移除的抬起。
-- (void)setStickyModifiers:(RDPModifierKey)modifiers previous:(RDPModifierKey)previous;
+- (void)setStickyModifiers:(RDPModifierKey)modifiers previous:(RDPModifierKey)previous NS_SWIFT_NAME(setStickyModifiers(_:previous:));
 
 /// 当前 sticky 修饰键
 @property (nonatomic, readonly) RDPModifierKey stickyModifiers;
