@@ -81,12 +81,12 @@ final class KeyboardCaptureField: UITextField {
         onBackspace?()
     }
 
-    override func pressesBegan(_ presses: Set<UIPress>, with event: UIPressEvent?) {
+    override func pressesBegan(_ presses: Set<UIPress>, with event: UIPressesEvent?) {
         if dispatchPresses(presses, down: true) { return }
         super.pressesBegan(presses, with: event)
     }
 
-    override func pressesEnded(_ presses: Set<UIPress>, with event: UIPressEvent?) {
+    override func pressesEnded(_ presses: Set<UIPress>, with event: UIPressesEvent?) {
         if dispatchPresses(presses, down: false) { return }
         super.pressesEnded(presses, with: event)
     }
@@ -96,7 +96,7 @@ final class KeyboardCaptureField: UITextField {
         var handledAny = false
         for press in presses {
             guard let key = press.key else { continue }
-            if let scan = Self.hidMap[key.keyCode] {
+            if let scan = Self.hidMap[UInt(key.keyCode.rawValue)] {
                 handledAny = onPhysicalKey(scan, down) || handledAny
             }
         }
@@ -177,10 +177,10 @@ final class RDPViewController: UIViewController {
         }
 
         do {
-            try bridge.connectToHost(host.host, port: Int(host.port),
+            try bridge.connectToHost(host.host, port: UInt(host.port),
                                      username: host.username, password: password,
-                                     domain: host.domain, desktopWidth: Int(width),
-                                     desktopHeight: Int(height))
+                                     domain: host.domain, desktopWidth: UInt(width),
+                                     desktopHeight: UInt(height))
         } catch {
             onStateChange?(.failed, error.localizedDescription)
         }

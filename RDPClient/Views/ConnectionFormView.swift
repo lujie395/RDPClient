@@ -115,7 +115,7 @@ struct ConnectionFormView: View {
 
         let width = UInt32(widthText) ?? 0
         let height = UInt32(heightText) ?? 0
-        if width == 0 != (height == 0) {
+        if (width == 0) != (height == 0) {
             validationMessage = "分辨率需要同时填写宽和高，或都留空"
             return
         }
