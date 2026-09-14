@@ -32,7 +32,9 @@ jobs:
           cmake --version | head -1
 
       - name: 编译依赖与工程（bootstrap.sh）
-        run: ./bootstrap.sh
+        run: |
+          chmod +x bootstrap.sh scripts/*.sh
+          ./bootstrap.sh
 
       - name: xcodebuild 编译 Release（不签名）
         run: |
