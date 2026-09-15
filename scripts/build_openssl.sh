@@ -13,7 +13,7 @@
 set -eo pipefail
 
 OPENSSL_VERSION="${OPENSSL_VERSION:-3.3.2}"
-MIN_IOS="${MIN_IOS:-18.0}"
+MIN_IOS="${MIN_IOS:-16.0}"
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 WORK="$ROOT/third-party"

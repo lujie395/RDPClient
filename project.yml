@@ -4,13 +4,13 @@
 # 说明：
 #   - 静态库目录名带 $(PLATFORM_NAME)（iphoneos / iphonesimulator），
 #     由 scripts/*.sh 产出，让真机与模拟器各自链接各自的库。
-#   - Deployment target 取 iOS 18.0（覆盖 iOS 18.0/18.1/18.2 设备；
-#     用户目标设备为 iOS 18.2，完全兼容）。
+#   - Deployment target 取 iOS 16.0，最大化设备兼容
+#     （NavigationStack 需要 16+；用户手机 iOS 16/17/18 均可安装）。
 name: RDPClient
 options:
   bundleIdPrefix: com.rdpclient
   deploymentTarget:
-    iOS: "18.0"
+    iOS: "16.0"
   createIntermediateGroups: true
 
 settings:

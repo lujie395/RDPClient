@@ -18,9 +18,18 @@ struct HostListView: View {
         NavigationStack {
             Group {
                 if store.hosts.isEmpty {
-                    ContentUnavailableView("还没有连接",
-                                           systemImage: "display.and.arrow.down",
-                                           description: Text("点击右上角 +，添加局域网里的 Windows 电脑"))
+                    // iOS 16 兼容写法（ContentUnavailableView 需要 iOS 17+）
+                    VStack(spacing: 12) {
+                        Image(systemName: "display.and.arrow.down")
+                            .font(.system(size: 48))
+                            .foregroundStyle(.secondary)
+                        Text("还没有连接")
+                            .font(.title3.weight(.medium))
+                        Text("点击右上角 +，添加局域网里的 Windows 电脑")
+                            .font(.subheadline)
+                            .foregroundStyle(.secondary)
+                    }
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
                 } else {
                     List {
                         ForEach(store.hosts) { host in

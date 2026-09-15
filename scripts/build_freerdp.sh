@@ -14,7 +14,7 @@
 #
 set -eo pipefail
 
-MIN_IOS="${MIN_IOS:-18.0}"
+MIN_IOS="${MIN_IOS:-16.0}"
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 FREERDP_DIR="$ROOT/FreeRDP"
