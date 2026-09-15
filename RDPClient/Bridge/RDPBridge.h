@@ -44,16 +44,16 @@ FOUNDATION_EXPORT NSString * const RDPBridgeErrorDomain;
 @interface RDPBridge : NSObject
 
 /// 当前状态（变更时通过 stateHandler 回调，主线程）
-@property (nonatomic, readonly) RDPBridgeState state;
+@property (nonatomic, assign, readonly) RDPBridgeState state;
 
 /// 会话是否处于活跃连接（输入 API 的前置条件）
 - (BOOL)isConnected;
 
 /// 失败时的错误描述（中文，可直接展示）
-@property (nonatomic, readonly, copy, nullable) NSString *lastErrorMessage;
+@property (nonatomic, copy, readonly, nullable) NSString *lastErrorMessage;
 
 /// 协商后的远程桌面尺寸（像素），连接后有效
-@property (nonatomic, readonly) CGSize desktopSize;
+@property (nonatomic, assign, readonly) CGSize desktopSize;
 
 /// 回调：状态变化（主线程）
 @property (nonatomic, copy, nullable) void (^stateHandler)(RDPBridgeState state,

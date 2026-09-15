@@ -65,6 +65,14 @@ static BridgeContext *ContextFor(rdpContext *context)
 // 前向声明
 static BOOL bridge_post_connect(freerdp *instance);
 
+// 内部方法（C 回调需要调用，先声明避免编译顺序问题）
+@interface RDPBridge (InternalAccess)
+- (NSString *)savedUsername;
+- (NSString *)savedPassword;
+- (NSString *)savedDomain;
+- (void)setDesktopSize:(CGSize)size;
+@end
+
 // ---------------------------------------------------------------------------
 // 帧推送：GDI primary buffer -> CGImage -> 主线程
 // ---------------------------------------------------------------------------
@@ -158,7 +166,7 @@ static BOOL bridge_desktop_resize(rdpContext *context)
         RDPBridge *bridge = bc->bridge;
         CGSize size = CGSizeMake((CGFloat)gdi->width, (CGFloat)gdi->height);
         dispatch_async(dispatch_get_main_queue(), ^{
-            bridge.desktopSize = size;
+            [bridge setDesktopSize:size];
             if (bridge.resizeHandler)
                 bridge.resizeHandler(size);
         });
@@ -189,7 +197,7 @@ static BOOL bridge_post_connect(freerdp *instance)
     RDPBridge *bridge = bc->bridge;
     CGSize size = CGSizeMake((CGFloat)gdi->width, (CGFloat)gdi->height);
     dispatch_async(dispatch_get_main_queue(), ^{
-        bridge.desktopSize = size;
+        [bridge setDesktopSize:size];
         if (bridge.resizeHandler)
             bridge.resizeHandler(size);
     });
@@ -206,9 +214,12 @@ static BOOL bridge_authenticate_ex(freerdp *instance, char **username, char **pa
         return FALSE;
 
     RDPBridge *bridge = bc->bridge;
-    *username = strdup(bridge.username.UTF8String);
-    *password = strdup(bridge.password.UTF8String);
-    *domain = bridge.domain.length > 0 ? strdup(bridge.domain.UTF8String) : nullptr;
+    NSString *u = [bridge savedUsername];
+    NSString *p = [bridge savedPassword];
+    NSString *d = [bridge savedDomain];
+    *username = strdup(u.UTF8String ?: "");
+    *password = strdup(p.UTF8String ?: "");
+    *domain = d.length > 0 ? strdup(d.UTF8String) : nullptr;
     return (*username && *password) ? TRUE : FALSE;
 }
 
@@ -219,24 +230,65 @@ static BOOL bridge_authenticate_ex(freerdp *instance, char **username, char **pa
 {
     BridgeContext *_ctx;
     NSThread *_thread;
-    RDPModifierKey _sticky; // 由 setStickyModifiers 维护（供只读属性）
+    RDPModifierKey _sticky; // 由 setStickyModifiers 维护
+
+    // 以下为内部状态（对外只读，通过 getter 方法暴露，不使用属性合成）
+    RDPBridgeState _state;
+    NSString *_lastErrorMessage;
+    CGSize _desktopSize;
+    NSString *_savedUsername;
+    NSString *_savedPassword;
+    NSString *_savedDomain;
 }
-@property (nonatomic, readwrite) RDPBridgeState state;
-@property (nonatomic, readwrite, copy, nullable) NSString *lastErrorMessage;
-@property (nonatomic, readwrite) CGSize desktopSize;
-@property (nonatomic, copy) NSString *username; // 连接期间持有（AuthenticateEx 兜底用）
-@property (nonatomic, copy) NSString *password;
-@property (nonatomic, copy) NSString *domain;
 @end
 
 @implementation RDPBridge
 
-@synthesize state = _state;
-@synthesize lastErrorMessage = _lastErrorMessage;
-@synthesize desktopSize = _desktopSize;
-@synthesize username = _username;
-@synthesize password = _password;
-@synthesize domain = _domain;
+// ---- 只读属性的 getter（手写，避免 @synthesize 依赖）----
+
+- (RDPBridgeState)state
+{
+    return _state;
+}
+
+- (NSString *)lastErrorMessage
+{
+    return _lastErrorMessage;
+}
+
+- (CGSize)desktopSize
+{
+    return _desktopSize;
+}
+
+- (RDPModifierKey)stickyModifiers
+{
+    return _sticky;
+}
+
+// ---- 内部使用（供 C 回调读取凭据）----
+
+- (NSString *)savedUsername
+{
+    return _savedUsername;
+}
+
+- (NSString *)savedPassword
+{
+    return _savedPassword;
+}
+
+- (NSString *)savedDomain
+{
+    return _savedDomain;
+}
+
+// ---- 内部 setter ----
+
+- (void)setDesktopSize:(CGSize)size
+{
+    _desktopSize = size;
+}
 
 - (instancetype)init
 {
@@ -245,11 +297,6 @@ static BOOL bridge_authenticate_ex(freerdp *instance, char **username, char **pa
         _state = RDPBridgeStateIdle;
     }
     return self;
-}
-
-- (RDPModifierKey)stickyModifiers
-{
-    return _sticky;
 }
 
 - (BOOL)isConnected
@@ -268,7 +315,7 @@ static BOOL bridge_authenticate_ex(freerdp *instance, char **username, char **pa
         desktopHeight:(NSUInteger)height
                 error:(NSError **)error
 {
-    if (self.state == RDPBridgeStateConnecting || self.state == RDPBridgeStateConnected)
+    if (_state == RDPBridgeStateConnecting || _state == RDPBridgeStateConnected)
     {
         if (error)
             *error = [NSError errorWithDomain:RDPBridgeErrorDomain
@@ -327,9 +374,9 @@ static BOOL bridge_authenticate_ex(freerdp *instance, char **username, char **pa
         _ctx->instance->AuthenticateEx = bridge_authenticate_ex;
 
         // 凭据保留给 AuthenticateEx 兜底
-        self.username = config[@"username"];
-        self.password = config[@"password"];
-        self.domain = config[@"domain"];
+        _savedUsername = [config[@"username"] copy];
+        _savedPassword = [config[@"password"] copy];
+        _savedDomain = [config[@"domain"] copy];
 
         // ---- 配置 settings（freerdp_settings_set_value_for_name 自 3.0.0 起稳定可用）----
         rdpSettings *settings = _ctx->context->settings;
@@ -423,9 +470,9 @@ static BOOL bridge_authenticate_ex(freerdp *instance, char **username, char **pa
     if (!_ctx)
         return;
 
-    self.password = nil;
-    self.username = nil;
-    self.domain = nil;
+    _savedPassword = nil;
+    _savedUsername = nil;
+    _savedDomain = nil;
     _sticky = 0;
 
     if (_ctx->instance)
@@ -458,8 +505,8 @@ static BOOL bridge_authenticate_ex(freerdp *instance, char **username, char **pa
 - (void)setState:(RDPBridgeState)state message:(nullable NSString *)message
 {
     void (^block)(void) = ^{
-        self.state = state;
-        self.lastErrorMessage = message;
+        self->_state = state;
+        self->_lastErrorMessage = [message copy];
         if (self.stateHandler)
             self.stateHandler(state, message);
     };
