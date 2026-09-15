@@ -82,7 +82,7 @@ struct KeyboardBarView: View {
 
     private var divider: some View {
         Rectangle()
-            .fill(.separator)
+            .fill(Color.secondary.opacity(0.4)) // iOS 16 兼容（.separator 需要 iOS 17+）
             .frame(width: 1, height: 22)
             .padding(.horizontal, 2)
     }

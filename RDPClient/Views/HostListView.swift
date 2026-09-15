@@ -61,9 +61,16 @@ struct HostListView: View {
                 ConnectionFormView(editing: host)
                     .environmentObject(store)
             }
-            .navigationDestination(item: $connectingHost) { host in
-                RemoteScreenView(host: host)
-                    .environmentObject(store)
+            // iOS 16 兼容：navigationDestination(item:) 需要 iOS 17+，
+            // 改用 isPresented 形式
+            .navigationDestination(isPresented: Binding(
+                get: { connectingHost != nil },
+                set: { if !$0 { connectingHost = nil }
+                })) {
+                if let host = connectingHost {
+                    RemoteScreenView(host: host)
+                        .environmentObject(store)
+                }
             }
         }
     }
