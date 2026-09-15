@@ -379,7 +379,6 @@ static BOOL bridge_authenticate_ex(freerdp *instance, char **username, char **pa
         _savedDomain = [config[@"domain"] copy];
 
         // ---- 配置 settings（freerdp_settings_set_value_for_name 自 3.0.0 起稳定可用）----
-        rdpSettings *settings = _ctx->context->settings;
         NSString *port = [config[@"port"] stringValue];
         NSString *w = [config[@"width"] stringValue];
         NSString *h = [config[@"height"] stringValue];

@@ -63,8 +63,24 @@ build() {
   cmake --build "$builddir" --config Release --target freerdp winpr
 
   mkdir -p "$distdir"
-  find "$builddir" -name "libfreerdp.a" -exec cp -v {} "$distdir/" \;
-  find "$builddir" -name "libwinpr.a"   -exec cp -v {} "$distdir/" \;
+
+  # FreeRDP 3.x 的静态库输出名可能带 API 版本后缀（libfreerdp3.a / libwinpr3.a），
+  # 用通配查找并统一重命名为 libfreerdp.a / libwinpr.a（与 project.yml 的 -lfreerdp 对应）。
+  # 拷贝后必须校验存在，避免静默失败导致链接阶段才报错。
+  frdp_lib="$(find "$builddir" -name "libfreerdp*.a" -not -name "*pkgconfig*" | head -1)"
+  winpr_lib="$(find "$builddir" -name "libwinpr*.a" -not -name "*pkgconfig*" | head -1)"
+  if [ -z "$frdp_lib" ]; then
+    echo "错误：构建树中未找到 libfreerdp*.a" >&2
+    find "$builddir" -name "*.a" | head -20 >&2 || true
+    exit 1
+  fi
+  if [ -z "$winpr_lib" ]; then
+    echo "错误：构建树中未找到 libwinpr*.a" >&2
+    find "$builddir" -name "*.a" | head -20 >&2 || true
+    exit 1
+  fi
+  cp -v "$frdp_lib"  "$distdir/libfreerdp.a"
+  cp -v "$winpr_lib" "$distdir/libwinpr.a"
 }
 
 build "iphoneos"        "OS64"
