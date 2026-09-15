@@ -70,15 +70,17 @@ jobs:
           rm -rf Payload && mkdir Payload
           cp -R "$APP" Payload/
 
-          # ad-hoc 伪签名：生成完整的 _CodeSignature/CodeResources 结构，
-          # 比 ldid 更标准，Sideloadly/AltStore 重签最顺
-          codesign --force --deep --sign - --timestamp=none "Payload/RDPClient.app" || true
-
-          # 打印 Info.plist 实际内容（诊断安装失败用）
+          # 注意：不做任何伪签名（codesign/ldid 都不用）。
+          # xcodebuild CODE_SIGNING_ALLOWED=NO 的产物本身无签名槽，
+          # 这是 Sideloadly/爱思/AltStore 内置签名引擎最稳定的输入。
+          echo "===== 确认无签名 ====="
+          codesign -d "Payload/RDPClient.app" 2>&1 | head -3 || true
           echo "===== Info.plist ====="
           plutil -p Payload/RDPClient.app/Info.plist
           echo "===== 二进制架构 ====="
           lipo -info Payload/RDPClient.app/RDPClient
+          echo "===== app 内容清单 ====="
+          ls -la Payload/RDPClient.app/
 
           zip -qry RDPClient-unsigned.ipa Payload
           ls -lh RDPClient-unsigned.ipa

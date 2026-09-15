@@ -60,8 +60,9 @@
 |---|---|---|---|
 | **GitHub Desktop** | 管理代码、上传到 GitHub | [desktop.github.com](https://desktop.github.com) | 直接下载 Windows 版 |
 | **iTunes** | 提供 USB 驱动和文件传输组件 | [apple.com/itunes](https://www.apple.com/itunes/) | ⚠️ **必须官网下载版**，微软商店版缺驱动，Sideloadly 认不到 |
-| **Sideloadly** | 给 IPA 签名并安装到 iPhone | [sideloadly.io](https://sideloadly.io) | 选 Windows 版 |
-| **7-Zip**（可选） | 解压 zip | [7-zip.org](https://www.7-zip.org) | Windows 自带解压也能用 |
+| **Sideloadly** | 给 IPA 签名并安装到 iPhone | [sideloadly.io](https://sideloadly.io) | 选 Windows 版。**建议装 0.40 或更新版本**，旧版签名引擎对新包兼容差 |
+| **7-Zip**（可选） | 解压 zip、检查 IPA 内部结构 | [7-zip.org](https://www.7-zip.org) | ⚠️ 强烈建议装，阶段 2.5 验证包结构要用它 |
+| **爱思助手**（备用） | 交叉验证签名/安装问题 | [i4.cn](https://www.i4.cn) | Sideloadly 失败时的 B 方案 |
 
 ### ✅ 检查点 0
 
@@ -179,9 +180,10 @@ Windows 默认隐藏以点开头的文件夹。先打开显示隐藏文件：
 |---|---|---|
 | 检出代码 | 拉取你的仓库 | 10 秒 |
 | 安装构建工具 | 装 cmake / xcodegen / ldid | 2 分钟 |
+| 规范化换行符并设置脚本权限 | 修掉 Windows 上传导致的 CRLF | 5 秒 |
 | 编译依赖与工程 | **编译 OpenSSL + FreeRDP** | **30~50 分钟** |
 | xcodebuild 编译 | 编译 App 本身 | 3~5 分钟 |
-| 打包未签名 IPA | 打包成 ipa 文件 | 30 秒 |
+| 打包未签名 IPA | 打包成 ipa（**不做任何伪签名**） | 30 秒 |
 | 上传 IPA | 存成可下载的产物 | 30 秒 |
 
 - 页面可以关掉，云端继续跑，**不影响**
@@ -198,11 +200,32 @@ Windows 默认隐藏以点开头的文件夹。先打开显示隐藏文件：
 4. 解压这个 zip → 里面是 **`RDPClient-unsigned.ipa`**
    - ⚠️ 注意：解压出来的 ipa 可能套了一层文件夹，确保 ipa 文件本身在你的下载目录里
 
+### 2.5 先验证这个 IPA「干净」
+
+**这一步能提前拦住 90% 的安装报错**，务必做：
+
+1. 在 Windows 上把 `RDPClient-unsigned.ipa` **复制一份**，改名为 `check.zip`
+2. 右键 → 解压到当前文件夹
+3. 进入解压出来的 `Payload` → `RDPClient.app`
+4. 打开「查看 → 显示 → 隐藏的项目」（或用 7-Zip 直接看），确认：
+
+| 检查项 | 应该的状态 | 说明 |
+|---|---|---|
+| `_CodeSignature` 文件夹 | **不存在** ✅ | 存在说明 CI 做了伪签名，会导致 `0xe8008014` |
+| `embedded.mobileprovision` | **不存在** ✅ | 这是别人证书留下的描述文件，必须没有 |
+| `RDPClient`（可执行文件） | 存在 ✅ | 主程序 |
+| `Info.plist` | 存在 ✅ | 用记事本打开，里面**不应有** `$(` 字样 |
+| `Frameworks` 文件夹 | 不存在或为空 ✅ | 本工程是静态链接，不该有动态库 |
+
+5. 如果 `_CodeSignature` 存在 → **回阶段 2 重新跑 Actions**（CI 配置已修正，新产物不会再有）
+6. 验证完把 `check.zip` 删掉，**安装时用原始的 `.ipa` 文件**
+
 ### ✅ 检查点 2
 
 - [ ] Actions 里那次运行显示绿色 ✅
 - [ ] 已下载并解压得到 `RDPClient-unsigned.ipa`（大小约 15~40 MB）
 - [ ] 文件名后缀确实是 `.ipa`
+- [ ] **已按 2.5 验证包内无 `_CodeSignature`、无 `embedded.mobileprovision`**
 
 > **IPA 体积说明**：本工程静态链接了 FreeRDP 和 OpenSSL，未压缩约 30~60 MB，
 > 再加上启用 bitcode 剥离后有波动，属正常范围。如果只有几百 KB，说明下载错了。
@@ -280,7 +303,7 @@ Windows 默认隐藏以点开头的文件夹。先打开显示隐藏文件：
 
 > **打开就闪退？**
 > - 90% 是没信任证书，回到 4.4
-> - 也可能是 iOS 版本低于 18.0：设置 → 通用 → 关于本机 → 看「软件版本」
+> - 也可能是 iOS 版本低于 16.0：设置 → 通用 → 关于本机 → 看「软件版本」
 
 ---
 
@@ -366,6 +389,45 @@ Windows 默认隐藏以点开头的文件夹。先打开显示隐藏文件：
 | `Provision.cpp:150` 之类签名错误 | Apple ID 问题 | 用 App 专用密码；或换一个 Apple ID 试 |
 | `Unable to install` / 已存在同名 App | 冲突 | 先删掉手机上旧的同名 App 再装 |
 | `This app contains an embedded provisioning profile...` | 描述文件问题 | Sideloadly 里勾选 `Remove app plugins`（如有时）|
+| **`0xe8008014: The executable contains an invalid signature`** | CI 产物带了「半成品签名」，Sideloadly 的签名引擎替换它时出错 | **见下方专题** |
+| **`Invalid file`**（拖进去就报，没弹登录框） | 同上；也可能是拖拽的其实是 zip 不是 ipa | 见下方专题 |
+| `Guru Meditation` 弹窗 | Sideloadly 内部崩溃 | 先排除签名问题（见下方专题），再打开 verbose 看真实错误 |
+
+#### 专题：`0xe8008014` / `Invalid file` 的定位与解决
+
+这个报错的本质是**包里的签名结构不标准**。CI 如果给产物做了「伪签名」（ldid 或 macOS ad-hoc `codesign --sign -`），
+Sideloadly 内置的签名引擎（zsign）在**替换**这个已有签名槽时会失败。
+
+**对策：让 CI 产出完全不带任何签名的 IPA**（本工程 `.github/workflows/build-ipa.yml` 已按此配置，
+打包步骤里注释写着「不做任何伪签名」）。请按顺序排查：
+
+1. **确认 IPA 里没有签名残留**
+   - Windows 上把 `.ipa` 改名成 `.zip`，解压
+   - 进入 `Payload/RDPClient.app/`
+   - **不应该**看到 `_CodeSignature` 文件夹，也**不应有** `embedded.mobileprovision`
+   - 如果看到了 → 你下载的是旧版本 IPA，回阶段 2 重新跑一次 Actions
+
+2. **确认拖进去的确实是 `.ipa`**
+   `Invalid file` 有时只是文件扩展名不对。确认文件名结尾是 `.ipa`，不是 `.zip`。
+
+3. **Sideloadly 里的两个开关要改**（打开 Sideloadly → 右上角齿轮 `Settings`）
+   | 选项 | 改成 | 为什么 |
+   |---|---|---|
+   | `Anisette` | `Remote`（原为 Local） | Local 模式依赖本机装 Anisette 服务，Windows 上常常拿不到有效认证数据 |
+   | `Signing Mode` | 先保持 `Normal`；仍失败改 `Export IPA` | Export 模式只产出一个「已签名 IPA」不动手机，可再用爱思助手安装，能分清是签名失败还是安装失败 |
+   | `Enable Verbose Logging` | 打开 | 报错才看得清，日志在 `C:\Users\你的用户名\AppData\Local\Sideloadly\sideloadly.log` |
+
+4. **换一个 Apple ID 试**
+   Apple ID 被风控（短时间频繁注册/签名）也会伪装成签名错误。换一个账号或等 24 小时。
+
+5. **换工具交叉验证**
+   | 工具 | 说明 |
+   |---|---|
+   | 爱思助手 | 用「更多工具 → IPA 签名」单独签一次，成功后再安装；比直接拖拽更容易看清哪一步失败 |
+   | AltStore | 完全另一套签名链路（见附录 B），能直接绕开 Sideloadly 的问题 |
+   | 3uTools | 同类，可作为第三方验证 |
+
+> 如果以上都不行，把 `sideloadly.log` 里**从 `ERROR` 开始往下的 20 行**发给 AI 助手，这是最有价值的信息。
 
 ### 使用阶段
 
