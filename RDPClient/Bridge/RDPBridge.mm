@@ -231,6 +231,13 @@ static BOOL bridge_authenticate_ex(freerdp *instance, char **username, char **pa
 
 @implementation RDPBridge
 
+@synthesize state = _state;
+@synthesize lastErrorMessage = _lastErrorMessage;
+@synthesize desktopSize = _desktopSize;
+@synthesize username = _username;
+@synthesize password = _password;
+@synthesize domain = _domain;
+
 - (instancetype)init
 {
     if (self = [super init])
