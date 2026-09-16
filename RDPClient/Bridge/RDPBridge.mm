@@ -443,8 +443,11 @@ static BOOL bridge_authenticate_ex(freerdp *instance, char **username, char **pa
                 wLogAppender *app = WLog_GetLogAppender(rootLog);
                 if (app)
                 {
-                    WLog_ConfigureAppender(app, "outputfilepath", logDir.fileSystemRepresentation);
-                    WLog_ConfigureAppender(app, "outputfilename", logFile.fileSystemRepresentation);
+                    // 第三参数是 void *：ObjC++ 下 const char * 必须显式强转
+                    WLog_ConfigureAppender(app, "outputfilepath",
+                                           (void *)logDir.fileSystemRepresentation);
+                    WLog_ConfigureAppender(app, "outputfilename",
+                                           (void *)logFile.fileSystemRepresentation);
                     WLog_OpenAppender(rootLog);
                     WLog_SetStringLogLevel(rootLog, "DEBUG");
                 }
