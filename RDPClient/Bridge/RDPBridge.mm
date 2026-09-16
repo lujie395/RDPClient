@@ -378,34 +378,63 @@ static BOOL bridge_authenticate_ex(freerdp *instance, char **username, char **pa
         _savedPassword = [config[@"password"] copy];
         _savedDomain = [config[@"domain"] copy];
 
-        // ---- 配置 settings（freerdp_settings_set_value_for_name 自 3.0.0 起稳定可用）----
-        NSString *port = [config[@"port"] stringValue];
-        NSString *w = [config[@"width"] stringValue];
-        NSString *h = [config[@"height"] stringValue];
+        // ---- 配置 settings ----
+        // 直接用类型化 setter（freerdp_settings_set_string/uint16/uint32/bool）。
+        // 不用 freerdp_settings_set_value_for_name：它依赖编译期生成的
+        // 「名字 -> key」映射表，裁剪版 FreeRDP（关闭 H264/FFmpeg 等）下
+        // 部分 key 不在表里，会莫名返回 FALSE。
+        NSString *nsPort = [config[@"port"] stringValue];
+        NSString *nsW = [config[@"width"] stringValue];
+        NSString *nsH = [config[@"height"] stringValue];
+        rdpSettings *settings = _ctx->context->settings;
 
         BOOL ok = TRUE;
-        ok &= [self setValue:config[@"host"] forSetting:@"FreeRDP_ServerHostname"];
-        ok &= [self setValue:port forSetting:@"FreeRDP_ServerPort"];
-        ok &= [self setValue:config[@"username"] forSetting:@"FreeRDP_Username"];
-        ok &= [self setValue:config[@"password"] forSetting:@"FreeRDP_Password"];
-        ok &= [self setValue:w forSetting:@"FreeRDP_DesktopWidth"];
-        ok &= [self setValue:h forSetting:@"FreeRDP_DesktopHeight"];
-        ok &= [self setValue:@"32" forSetting:@"FreeRDP_ColorDepth"];
+        NSString *failedSetting = nil;
+#define BRIDGE_SET(expr)                    \
+    do                                      \
+    {                                       \
+        if (!(expr))                        \
+        {                                   \
+            if (!failedSetting)             \
+                failedSetting = @#expr;     \
+            ok = FALSE;                     \
+            WLog_ERR("RDPBridge", "设置失败: %s", #expr); \
+        }                                   \
+    } while (0)
 
-        // 布尔值只接受 TRUE/FALSE（见 freerdp_settings_set_value_for_name 实现）
-        ok &= [self setValue:@"TRUE" forSetting:@"FreeRDP_AutoLogonEnabled"];
-        ok &= [self setValue:@"TRUE" forSetting:@"FreeRDP_SoftwareGdi"];
-        ok &= [self setValue:@"TRUE" forSetting:@"FreeRDP_IgnoreCertificate"];
-        ok &= [self setValue:@"FALSE" forSetting:@"FreeRDP_SupportGraphicsPipeline"];
-        ok &= [self setValue:@"FALSE" forSetting:@"FreeRDP_NetworkAutoDetect"];
-        ok &= [self setValue:@"FALSE" forSetting:@"FreeRDP_AudioPlayback"];
-        ok &= [self setValue:@"FALSE" forSetting:@"FreeRDP_AudioCapture"];
-        ok &= [self setValue:@"TRUE" forSetting:@"FreeRDP_FontSmoothing"];
-        ok &= [self setValue:@"1033" forSetting:@"FreeRDP_KeyboardLayout"]; // en-US
+        BRIDGE_SET(freerdp_settings_set_string(settings, FreeRDP_ServerHostname,
+                                               config[@"host"].UTF8String ?: ""));
+        BRIDGE_SET(freerdp_settings_set_uint16(settings, FreeRDP_ServerPort,
+                                               (UINT16)nsPort.intValue));
+        BRIDGE_SET(freerdp_settings_set_string(settings, FreeRDP_Username,
+                                               config[@"username"].UTF8String ?: ""));
+        BRIDGE_SET(freerdp_settings_set_string(settings, FreeRDP_Password,
+                                               config[@"password"].UTF8String ?: ""));
+        BRIDGE_SET(freerdp_settings_set_string(settings, FreeRDP_Domain,
+                                               config[@"domain"].UTF8String ?: ""));
+        BRIDGE_SET(freerdp_settings_set_uint32(settings, FreeRDP_DesktopWidth,
+                                               (UINT32)nsW.intValue));
+        BRIDGE_SET(freerdp_settings_set_uint32(settings, FreeRDP_DesktopHeight,
+                                               (UINT32)nsH.intValue));
+        BRIDGE_SET(freerdp_settings_set_uint32(settings, FreeRDP_ColorDepth, 32));
+
+        BRIDGE_SET(freerdp_settings_set_bool(settings, FreeRDP_AutoLogonEnabled, TRUE));
+        BRIDGE_SET(freerdp_settings_set_bool(settings, FreeRDP_SoftwareGdi, TRUE));
+        BRIDGE_SET(freerdp_settings_set_bool(settings, FreeRDP_IgnoreCertificate, TRUE));
+        BRIDGE_SET(freerdp_settings_set_bool(settings, FreeRDP_SupportGraphicsPipeline, FALSE));
+        BRIDGE_SET(freerdp_settings_set_bool(settings, FreeRDP_NetworkAutoDetect, FALSE));
+        BRIDGE_SET(freerdp_settings_set_bool(settings, FreeRDP_AudioPlayback, FALSE));
+        BRIDGE_SET(freerdp_settings_set_bool(settings, FreeRDP_AudioCapture, FALSE));
+        BRIDGE_SET(freerdp_settings_set_bool(settings, FreeRDP_FontSmoothing, TRUE));
+        BRIDGE_SET(freerdp_settings_set_uint32(settings, FreeRDP_KeyboardLayout, 0x0409)); // en-US
+#undef BRIDGE_SET
 
         if (!ok)
         {
-            [self failWithMessage:@"RDP 配置写入失败"];
+            NSString *msg = failedSetting
+                                ? [NSString stringWithFormat:@"RDP 配置写入失败（%@）", failedSetting]
+                                : @"RDP 配置写入失败";
+            [self failWithMessage:msg];
             [self teardownContext];
             return;
         }
@@ -518,15 +547,6 @@ static BOOL bridge_authenticate_ex(freerdp *instance, char **username, char **pa
 - (void)failWithMessage:(NSString *)message
 {
     [self setState:RDPBridgeStateFailed message:message];
-}
-
-- (BOOL)setValue:(NSString *)value forSetting:(NSString *)name
-{
-    BOOL ok = freerdp_settings_set_value_for_name(_ctx->context->settings,
-                                                  name.UTF8String, value.UTF8String);
-    if (!ok)
-        WLog_ERR("RDPBridge", "设置 %s=%s 失败", name.UTF8String, value.UTF8String);
-    return ok;
 }
 
 // ------------------------------ 输入 ------------------------------
