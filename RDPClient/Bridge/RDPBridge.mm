@@ -416,8 +416,10 @@ static BOOL bridge_authenticate_ex(freerdp *instance, char **username, char **pa
 #if OPENSSL_VERSION_NUMBER >= 0x30000000L
     static dispatch_once_t onceToken;
     dispatch_once(&onceToken, ^{
-        extern OSSL_provider_init_fn OSSL_provider_init; // 来自 liblegacy.a
-        OSSL_PROVIDER_add_builtin(NULL, "legacy", OSSL_provider_init);
+        // 静态构建中 legacy provider 的入口符号是 ossl_legacy_provider_init
+        //（无前缀的 OSSL_provider_init 只存在于动态 .so 模块）
+        extern OSSL_provider_init_fn ossl_legacy_provider_init;
+        OSSL_PROVIDER_add_builtin(NULL, "legacy", ossl_legacy_provider_init);
     });
 #endif
 
