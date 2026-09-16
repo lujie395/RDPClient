@@ -540,14 +540,14 @@ static BOOL bridge_authenticate_ex(freerdp *instance, char **username, char **pa
     }
     if (!freerdp_context_new(_ctx->instance))
     {
-        // 把 FreeRDP 的 last_error 也带进返回信息，方便定位是哪个子系统
-        // （settings/transport/channels/graphics/...）初始化失败。
-        UINT32 code = freerdp_get_last_error(_ctx->instance->context);
-        NSString *errInfo = [NSString stringWithFormat:@"%s (0x%08X)",
-                             freerdp_get_last_error_name(code), code];
-        NSLog(@"[RDPBridge] freerdp_context_new 失败：%@", errInfo);
+        // 注意：freerdp_context_new 失败时，其内部 fail 分支会调用
+        // freerdp_context_free()，该函数末尾会把 instance->context 置为
+        // NULL。所以这里【绝对不能】再访问 _ctx->instance->context——
+        // freerdp_get_last_error(NULL) 会因 WINPR_ASSERT 直接 abort 闪退。
+        // 失败原因只能靠 WLog 日志（已重定向到 rdp-wlog.log）来定位。
+        NSLog(@"[RDPBridge] freerdp_context_new 失败：instance->context 已被释放");
         [self teardownContext];
-        return [NSString stringWithFormat:@"无法初始化 RDP 客户端上下文（last_error=%@）", errInfo];
+        return @"无法初始化 RDP 客户端上下文（详见日志）";
     }
     _ctx->context = _ctx->instance->context;
 
