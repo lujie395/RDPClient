@@ -382,11 +382,6 @@ static BOOL bridge_authenticate_ex(freerdp *instance, char **username, char **pa
     // 诊断：context_new 之前的 winpr 原语基线（失败时拼进弹窗）
     NSString *_winprBaseline;
 
-    // 内部方法
-- (void)prepareProcessEnvironment;
-- (void)setupWLogCapture;
-- (NSString *)attemptConnectWithConfig:(NSDictionary *)config profile:(int)profile;
-
     // 以下为内部状态（对外只读，通过 getter 方法暴露，不使用属性合成）
     RDPBridgeState _state;
     NSString *_lastErrorMessage;
@@ -395,6 +390,12 @@ static BOOL bridge_authenticate_ex(freerdp *instance, char **username, char **pa
     NSString *_savedPassword;
     NSString *_savedDomain;
 }
+
+// 内部方法（声明必须在 ivar block 之外）
+- (void)prepareProcessEnvironment;
+- (void)setupWLogCapture;
+- (NSString *)attemptConnectWithConfig:(NSDictionary *)config profile:(int)profile;
+
 @end
 
 @implementation RDPBridge
