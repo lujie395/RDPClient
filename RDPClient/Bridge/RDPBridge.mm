@@ -424,19 +424,33 @@ static BOOL bridge_authenticate_ex(freerdp *instance, char **username, char **pa
     });
 #endif
 
-    static BOOL redirected = NO;
-    NSString *logPath = [NSTemporaryDirectory() stringByAppendingPathComponent:@"rdp-wlog.log"];
-    // 同时把 stdout 和 stderr 都重定向到日志文件——WinPR 的 ConsoleAppender
-    // 对默认输出级别（DEBUG/INFO/TRACE 走 stdout，WARN/ERROR 走 stderr），
-    // 只重定向 stderr 会丢失大部分 FreeRDP 协议协商日志。
-    freopen(logPath.fileSystemRepresentation, redirected ? "a" : "w", stderr);
-    freopen(logPath.fileSystemRepresentation, redirected ? "a" : "a", stdout);
-    redirected = YES;
-
-    wLog *rootLog = WLog_GetRoot();
-    if (rootLog)
-        WLog_SetStringLogLevel(rootLog, "DEBUG");
-}
+    // WinPR 的 ConsoleAppender 在 iOS 沙盒里几乎没用（stdout/stderr
+    // 不指向文件，且 DEBUG/INFO 走 stdout、ERROR/WARN 走 stderr 分裂）。
+    // 改用 FileAppender：所有 WLog 子 logger（包括 FreeRDP 的）都会写到这里。
+    // 注意 WLog_GetRoot 必须先调（首次调会触发全局 root logger 初始化），
+    // 否则后续 SetLogAppenderType / ConfigureAppender 会作用于未初始化的 root。
+    static BOOL configured = NO;
+    if (!configured)
+    {
+        configured = YES;
+        NSString *logDir = [NSTemporaryDirectory() stringByAppendingPathComponent:@"wlog"];
+        NSString *logFile = @"rdp-wlog.log";
+        wLog *rootLog = WLog_GetRoot();
+        if (rootLog)
+        {
+            if (WLog_SetLogAppenderType(rootLog, WLOG_APPENDER_FILE))
+            {
+                wLogAppender *app = WLog_GetLogAppender(rootLog);
+                if (app)
+                {
+                    WLog_ConfigureAppender(app, "outputfilepath", logDir.fileSystemRepresentation);
+                    WLog_ConfigureAppender(app, "outputfilename", logFile.fileSystemRepresentation);
+                    WLog_OpenAppender(rootLog);
+                    WLog_SetStringLogLevel(rootLog, "DEBUG");
+                }
+            }
+        }
+    }
 
 // TCP 连通性预探（非阻塞 connect + select 超时）
 - (BOOL)tcpProbe:(NSString *)host
@@ -746,7 +760,7 @@ static BOOL bridge_authenticate_ex(freerdp *instance, char **username, char **pa
     // 把 FreeRDP 底层日志尾部复制进剪贴板，用户可直接粘贴给 AI 排障
     @autoreleasepool
     {
-        NSString *logPath = [NSTemporaryDirectory() stringByAppendingPathComponent:@"rdp-wlog.log"];
+        NSString *logPath = [NSTemporaryDirectory() stringByAppendingPathComponent:@"wlog/rdp-wlog.log"];
         NSData *data = [NSData dataWithContentsOfFile:logPath];
         if (data.length > 0)
         {
