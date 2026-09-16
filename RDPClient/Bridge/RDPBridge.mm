@@ -426,7 +426,11 @@ static BOOL bridge_authenticate_ex(freerdp *instance, char **username, char **pa
 
     static BOOL redirected = NO;
     NSString *logPath = [NSTemporaryDirectory() stringByAppendingPathComponent:@"rdp-wlog.log"];
+    // 同时把 stdout 和 stderr 都重定向到日志文件——WinPR 的 ConsoleAppender
+    // 对默认输出级别（DEBUG/INFO/TRACE 走 stdout，WARN/ERROR 走 stderr），
+    // 只重定向 stderr 会丢失大部分 FreeRDP 协议协商日志。
     freopen(logPath.fileSystemRepresentation, redirected ? "a" : "w", stderr);
+    freopen(logPath.fileSystemRepresentation, redirected ? "a" : "a", stdout);
     redirected = YES;
 
     wLog *rootLog = WLog_GetRoot();
@@ -528,10 +532,22 @@ static BOOL bridge_authenticate_ex(freerdp *instance, char **username, char **pa
     _ctx->bridge = self;
 
     _ctx->instance = freerdp_new();
-    if (!_ctx->instance || !freerdp_context_new(_ctx->instance))
+    if (!_ctx->instance)
     {
+        NSLog(@"[RDPBridge] freerdp_new 失败（malloc 失败？）");
         [self teardownContext];
-        return @"无法初始化 RDP 客户端上下文";
+        return @"无法创建 RDP 客户端实例（freerdp_new 失败）";
+    }
+    if (!freerdp_context_new(_ctx->instance))
+    {
+        // 把 FreeRDP 的 last_error 也带进返回信息，方便定位是哪个子系统
+        // （settings/transport/channels/graphics/...）初始化失败。
+        UINT32 code = freerdp_get_last_error(_ctx->instance->context);
+        NSString *errInfo = [NSString stringWithFormat:@"%s (0x%08X)",
+                             freerdp_get_last_error_name(code), code];
+        NSLog(@"[RDPBridge] freerdp_context_new 失败：%@", errInfo);
+        [self teardownContext];
+        return [NSString stringWithFormat:@"无法初始化 RDP 客户端上下文（last_error=%@）", errInfo];
     }
     _ctx->context = _ctx->instance->context;
 
