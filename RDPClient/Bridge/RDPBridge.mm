@@ -25,6 +25,15 @@
 #import <mutex>
 #import <string>
 
+#import <sys/socket.h>
+#import <sys/select.h>
+#import <netinet/in.h>
+#import <netdb.h>
+#import <fcntl.h>
+#import <unistd.h>
+#import <errno.h>
+#import <UIKit/UIKit.h>
+
 NSString * const RDPBridgeErrorDomain = @"RDPBridgeErrorDomain";
 
 // ---------------------------------------------------------------------------
@@ -353,45 +362,189 @@ static BOOL bridge_authenticate_ex(freerdp *instance, char **username, char **pa
 {
     @autoreleasepool
     {
-        _ctx = new BridgeContext();
-        _ctx->bridge = self;
+        // FreeRDP 底层日志：重定向 stderr 到文件 + 打开 DEBUG 级别，
+        // 失败时（failWithMessage）把日志尾部复制进剪贴板供排障。
+        [self setupWLogCapture];
 
-        _ctx->instance = freerdp_new();
-        if (!_ctx->instance || !freerdp_context_new(_ctx->instance))
+        // ---- TCP 预检：区分「网络层不通」与「RDP/TLS 协商失败」----
+        NSString *probeErr = nil;
+        if (![self tcpProbe:config[@"host"]
+                       port:[config[@"port"] unsignedIntegerValue]
+                     timeout:5.0
+                      error:&probeErr])
         {
-            [self failWithMessage:@"无法初始化 RDP 客户端上下文"];
-            [self teardownContext];
+            [self failWithMessage:
+                      [NSString stringWithFormat:@"网络层失败：无法建立 TCP 连接到 %@:%@（%@）",
+                                                 config[@"host"] ?: @"?",
+                                                 [config[@"port"] stringValue], probeErr]];
             return;
         }
-        _ctx->context = _ctx->instance->context;
 
+        // ---- 协议层：两套安全层配置依次自动尝试 ----
+        // profile 0：标准协商（NLA/CredSSP + TLS，FreeRDP 默认）
+        // profile 1：纯 TLS（跳过 NLA 协商；服务器强制 NLA 时此模式会被拒）
+        NSString *lastError = nil;
+        BOOL connected = NO;
+        for (int profile = 0; profile < 2 && !connected; profile++)
         {
-            std::lock_guard<std::mutex> lock(g_contextMutex);
-            g_contextMap[_ctx->context] = _ctx;
+            lastError = [self attemptConnectWithConfig:config profile:profile];
+            connected = (_state == RDPBridgeStateConnected);
         }
 
-        _ctx->instance->PostConnect = bridge_post_connect;
-        _ctx->instance->AuthenticateEx = bridge_authenticate_ex;
+        if (!connected)
+        {
+            [self failWithMessage:(lastError ?: @"连接失败")];
+            return;
+        }
 
-        // 凭据保留给 AuthenticateEx 兜底
-        _savedUsername = [config[@"username"] copy];
-        _savedPassword = [config[@"password"] copy];
-        _savedDomain = [config[@"domain"] copy];
+        // ---- 事件泵（阻塞至断开）----
+        [self pumpEvents];
 
-        // ---- 配置 settings ----
-        // 直接用类型化 setter（freerdp_settings_set_string/uint32/bool）。
-        // 不用 freerdp_settings_set_value_for_name：它依赖编译期生成的
-        // 「名字 -> key」映射表，裁剪版 FreeRDP（关闭 H264/FFmpeg 等）下
-        // 部分 key 不在表里，会莫名返回 FALSE。
-        // 注意：3.x 的 key 是按值类型分组的强类型枚举，key 类型必须与 setter 对应。
-        NSString *nsHost = config[@"host"] ?: @"";
-        NSString *nsUser = config[@"username"] ?: @"";
-        NSString *nsPass = config[@"password"] ?: @"";
-        NSString *nsDomain = config[@"domain"] ?: @"";
-        NSString *nsPort = [config[@"port"] stringValue];
-        NSString *nsW = [config[@"width"] stringValue];
-        NSString *nsH = [config[@"height"] stringValue];
-        rdpSettings *settings = _ctx->context->settings;
+        [self setState:RDPBridgeStateDisconnected message:nil];
+        [self teardownContext];
+    }
+}
+
+- (void)setupWLogCapture
+{
+    static BOOL redirected = NO;
+    NSString *logPath = [NSTemporaryDirectory() stringByAppendingPathComponent:@"rdp-wlog.log"];
+    freopen(logPath.fileSystemRepresentation, redirected ? "a" : "w", stderr);
+    redirected = YES;
+
+    wLog *rootLog = WLog_GetRootLog();
+    if (rootLog)
+        WLog_SetStringLogLevel(rootLog, "DEBUG");
+}
+
+// TCP 连通性预探（非阻塞 connect + select 超时）
+- (BOOL)tcpProbe:(NSString *)host
+             port:(NSUInteger)port
+           timeout:(NSTimeInterval)timeout
+             error:(NSString **)errOut
+{
+    struct addrinfo hints;
+    memset(&hints, 0, sizeof(hints));
+    hints.ai_family = AF_INET;
+    hints.ai_socktype = SOCK_STREAM;
+
+    struct addrinfo *res = nullptr;
+    NSString *portStr = [NSString stringWithFormat:@"%lu", (unsigned long)port];
+    int rc = getaddrinfo(host.UTF8String, portStr.UTF8String, &hints, &res);
+    if (rc != 0 || !res)
+    {
+        if (errOut)
+            *errOut = [NSString stringWithFormat:@"地址解析失败（%s）", gai_strerror(rc)];
+        return NO;
+    }
+
+    int fd = socket(res->ai_family, res->ai_socktype, res->ai_protocol);
+    if (fd < 0)
+    {
+        if (errOut)
+            *errOut = [NSString stringWithFormat:@"创建 socket 失败（errno=%d）", errno];
+        freeaddrinfo(res);
+        return NO;
+    }
+
+    int flags = fcntl(fd, F_GETFL, 0);
+    fcntl(fd, F_SETFL, flags | O_NONBLOCK);
+
+    BOOL ok = NO;
+    NSString *err = nil;
+    if (connect(fd, res->ai_addr, res->ai_addrlen) == 0)
+    {
+        ok = YES;
+    }
+    else if (errno == EINPROGRESS)
+    {
+        fd_set wfds;
+        FD_ZERO(&wfds);
+        FD_SET(fd, &wfds);
+        struct timeval tv;
+        tv.tv_sec = (long)timeout;
+        tv.tv_usec = 0;
+        int sr = select(fd + 1, nullptr, &wfds, nullptr, &tv);
+        if (sr > 0)
+        {
+            int soerr = 0;
+            socklen_t len = sizeof(soerr);
+            getsockopt(fd, SOL_SOCKET, SO_ERROR, &soerr, &len);
+            if (soerr == 0)
+            {
+                ok = YES;
+            }
+            else
+            {
+                err = [NSString stringWithFormat:@"连接被拒绝或不可达（%s）", strerror(soerr)];
+            }
+        }
+        else if (sr == 0)
+        {
+            err = [NSString stringWithFormat:@"超时（%g 秒无响应）", timeout];
+        }
+        else
+        {
+            err = [NSString stringWithFormat:@"select 失败（errno=%d）", errno];
+        }
+    }
+    else
+    {
+        err = [NSString stringWithFormat:@"connect 立即失败（%s）", strerror(errno)];
+    }
+
+    close(fd);
+    freeaddrinfo(res);
+    if (!ok && errOut)
+        *errOut = err ?: @"未知错误";
+    return ok;
+}
+
+// 单次连接尝试（含完整 settings 配置），成功返回 nil，失败返回错误描述
+- (NSString *)attemptConnectWithConfig:(NSDictionary *)config profile:(int)profile
+{
+    @autoreleasepool
+    {
+    [self teardownContext];
+
+    _ctx = new BridgeContext();
+    _ctx->bridge = self;
+
+    _ctx->instance = freerdp_new();
+    if (!_ctx->instance || !freerdp_context_new(_ctx->instance))
+    {
+        [self teardownContext];
+        return @"无法初始化 RDP 客户端上下文";
+    }
+    _ctx->context = _ctx->instance->context;
+
+    {
+        std::lock_guard<std::mutex> lock(g_contextMutex);
+        g_contextMap[_ctx->context] = _ctx;
+    }
+
+    _ctx->instance->PostConnect = bridge_post_connect;
+    _ctx->instance->AuthenticateEx = bridge_authenticate_ex;
+
+    // 凭据保留给 AuthenticateEx 兜底
+    _savedUsername = [config[@"username"] copy];
+    _savedPassword = [config[@"password"] copy];
+    _savedDomain = [config[@"domain"] copy];
+
+    // ---- 配置 settings ----
+    // 直接用类型化 setter（freerdp_settings_set_string/uint32/bool）。
+    // 不用 freerdp_settings_set_value_for_name：它依赖编译期生成的
+    // 「名字 -> key」映射表，裁剪版 FreeRDP（关闭 H264/FFmpeg 等）下
+    // 部分 key 不在表里，会莫名返回 FALSE。
+    // 注意：3.x 的 key 是按值类型分组的强类型枚举，key 类型必须与 setter 对应。
+    NSString *nsHost = config[@"host"] ?: @"";
+    NSString *nsUser = config[@"username"] ?: @"";
+    NSString *nsPass = config[@"password"] ?: @"";
+    NSString *nsDomain = config[@"domain"] ?: @"";
+    NSString *nsPort = [config[@"port"] stringValue];
+    NSString *nsW = [config[@"width"] stringValue];
+    NSString *nsH = [config[@"height"] stringValue];
+    rdpSettings *settings = _ctx->context->settings;
 
         BOOL ok = TRUE;
         NSString *failedSetting = nil;
@@ -434,14 +587,23 @@ static BOOL bridge_authenticate_ex(freerdp *instance, char **username, char **pa
         BRIDGE_SET(freerdp_settings_set_uint32(settings, FreeRDP_KeyboardLayout, 0x0409)); // en-US
 #undef BRIDGE_SET
 
+        // ---- 安全层策略 ----
+        if (profile >= 1)
+        {
+            // profile 1：纯 TLS —— 不请求 NLA/CredSSP，直接走 TLS 加密登录
+            freerdp_settings_set_bool(settings, FreeRDP_NegotiateSecurityLayer, FALSE);
+            freerdp_settings_set_bool(settings, FreeRDP_NlaSecurity, FALSE);
+            freerdp_settings_set_bool(settings, FreeRDP_TlsSecurity, TRUE);
+            freerdp_settings_set_bool(settings, FreeRDP_UseRdpSecurityLayer, FALSE);
+        }
+
         if (!ok)
         {
             NSString *msg = failedSetting
                                 ? [NSString stringWithFormat:@"RDP 配置写入失败（%@）", failedSetting]
                                 : @"RDP 配置写入失败";
-            [self failWithMessage:msg];
             [self teardownContext];
-            return;
+            return msg;
         }
 
         // ---- 连接（阻塞在本线程）----
@@ -450,21 +612,16 @@ static BOOL bridge_authenticate_ex(freerdp *instance, char **username, char **pa
             UINT32 code = freerdp_get_last_error(_ctx->context);
             const char *name = freerdp_get_last_error_name(code);
             const char *desc = freerdp_get_last_error_string(code);
-            NSString *message = [NSString stringWithFormat:@"连接失败：%@（%@）",
+            NSString *message = [NSString stringWithFormat:@"%@：%@（%@）",
+                                 profile >= 1 ? @"纯 TLS 模式失败" : @"标准模式（NLA+TLS）失败",
                                  desc ? [NSString stringWithUTF8String:desc] : @"未知错误",
                                  name ? [NSString stringWithUTF8String:name] : @"UNKNOWN"];
-            [self failWithMessage:message];
             [self teardownContext];
-            return;
+            return message;
         }
 
         [self setState:RDPBridgeStateConnected message:nil];
-
-        // ---- 事件泵 ----
-        [self pumpEvents];
-
-        [self setState:RDPBridgeStateDisconnected message:nil];
-        [self teardownContext];
+        return nil;
     }
 }
 
@@ -551,6 +708,21 @@ static BOOL bridge_authenticate_ex(freerdp *instance, char **username, char **pa
 
 - (void)failWithMessage:(NSString *)message
 {
+    // 把 FreeRDP 底层日志尾部复制进剪贴板，用户可直接粘贴给 AI 排障
+    @autoreleasepool
+    {
+        NSString *logPath = [NSTemporaryDirectory() stringByAppendingPathComponent:@"rdp-wlog.log"];
+        NSData *data = [NSData dataWithContentsOfFile:logPath];
+        if (data.length > 0)
+        {
+            NSUInteger readLen = MIN(data.length, (NSUInteger)10000);
+            NSData *tailData = [data subdataWithRange:NSMakeRange(data.length - readLen, readLen)];
+            NSString *tail = [[NSString alloc] initWithData:tailData encoding:NSUTF8StringEncoding] ?: @"";
+            NSString *full = [NSString stringWithFormat:@"[RDPClient 底层日志]\n%@\n\n[错误摘要]\n%@", tail, message ?: @""];
+            [UIPasteboard generalPasteboard].string = full;
+            message = [message stringByAppendingString:@"\n\n（底层日志已复制到剪贴板，可直接粘贴发送）"];
+        }
+    }
     [self setState:RDPBridgeStateFailed message:message];
 }
 
