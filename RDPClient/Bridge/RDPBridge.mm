@@ -412,7 +412,7 @@ static BOOL bridge_authenticate_ex(freerdp *instance, char **username, char **pa
     freopen(logPath.fileSystemRepresentation, redirected ? "a" : "w", stderr);
     redirected = YES;
 
-    wLog *rootLog = WLog_GetRootLog();
+    wLog *rootLog = WLog_GetRoot();
     if (rootLog)
         WLog_SetStringLogLevel(rootLog, "DEBUG");
 }
