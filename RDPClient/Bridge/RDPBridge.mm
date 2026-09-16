@@ -20,6 +20,8 @@
 #import <freerdp/error.h>
 #import <winpr/synch.h>
 #import <winpr/wlog.h>
+#import <winpr/collections.h>
+#import <winpr/environment.h>
 
 #import <openssl/opensslv.h>
 #import <openssl/provider.h>
@@ -46,6 +48,48 @@ struct BridgeContext;
 
 static std::mutex g_contextMutex;
 static std::map<rdpContext *, BridgeContext *> g_contextMap;
+
+// winpr 原语自检：context_new 在 iOS 上静默失败时，用这些探针定位
+// 是哪个底层子系统（InitOnce/Event/HashTable/Queue/WLog）不工作。
+static BOOL bridge_diag_once_fn(PINIT_ONCE once, PVOID param, PVOID *ctx)
+{
+    return TRUE;
+}
+
+static NSString *bridge_run_winpr_diag(void)
+{
+    NSMutableString *d = [NSMutableString string];
+
+    wLog *rl = WLog_GetRoot();
+    [d appendFormat:@"WLog:%@ ", rl ? @"ok" : @"NULL"];
+
+    HANDLE ev = CreateEvent(NULL, TRUE, FALSE, NULL);
+    BOOL evOk = (ev && ev != INVALID_HANDLE_VALUE);
+    [d appendFormat:@"Event:%@ ", evOk ? @"ok" : @"FAIL"];
+    if (evOk)
+        CloseHandle(ev);
+
+    wHashTable *ht = HashTable_New(FALSE);
+    [d appendFormat:@"HT:%@ ", ht ? @"ok" : @"NULL"];
+    if (ht)
+        HashTable_Free(ht);
+
+    wMessageQueue *mq = MessageQueue_New(NULL);
+    [d appendFormat:@"MQ:%@ ", mq ? @"ok" : @"NULL"];
+    if (mq)
+        MessageQueue_Free(mq);
+
+    static INIT_ONCE s_diag_once = INIT_ONCE_STATIC_INIT;
+    BOOL onceOk = InitOnceExecuteOnce(&s_diag_once, bridge_diag_once_fn, NULL, NULL);
+    [d appendFormat:@"Once:%@ ", onceOk ? @"ok" : @"FAIL"];
+
+    // 日志文件是否真的被 FileAppender 创建（setupWLogCapture 的 marker 应已写入）
+    NSString *logPath = [NSTemporaryDirectory() stringByAppendingPathComponent:@"wlog/rdp-wlog.log"];
+    BOOL logExists = [[NSFileManager defaultManager] fileExistsAtPath:logPath];
+    [d appendFormat:@"LogFile:%@", logExists ? @"ok" : @"none"];
+
+    return d;
+}
 
 struct BridgeContext
 {
@@ -243,6 +287,9 @@ static BOOL bridge_authenticate_ex(freerdp *instance, char **username, char **pa
     BridgeContext *_ctx;
     NSThread *_thread;
     RDPModifierKey _sticky; // 由 setStickyModifiers 维护
+
+    // 诊断：context_new 之前的 winpr 原语基线（失败时拼进弹窗）
+    NSString *_winprBaseline;
 
     // 以下为内部状态（对外只读，通过 getter 方法暴露，不使用属性合成）
     RDPBridgeState _state;
@@ -450,6 +497,11 @@ static BOOL bridge_authenticate_ex(freerdp *instance, char **username, char **pa
                                            (void *)logFile.fileSystemRepresentation);
                     WLog_OpenAppender(rootLog);
                     WLog_SetStringLogLevel(rootLog, "DEBUG");
+
+                    // marker：验证 FileAppender 真的能写。若失败，说明
+                    // appender 配置有问题，后续日志为空是配置问题而非
+                    // 「context_new 恰好无日志可打」。
+                    WLog_Print(rootLog, WLOG_INFO, "=== RDPBridge WLog marker: appender OK ===");
                 }
             }
         }
@@ -556,16 +608,25 @@ static BOOL bridge_authenticate_ex(freerdp *instance, char **username, char **pa
         [self teardownContext];
         return @"无法创建 RDP 客户端实例（freerdp_new 失败）";
     }
+
+    // 基线自检：context_new 之前先确认 winpr 原语全部正常。
+    // 若这里就 FAIL，问题在原语本身；若这里 ok 而后面 context_new 失败，
+    // 问题在 FreeRDP 内部某个子系统的初始化。
+    _winprBaseline = bridge_run_winpr_diag();
+    NSLog(@"[RDPBridge] winpr 基线自检（profile %d）：%@", profile, _winprBaseline);
+
     if (!freerdp_context_new(_ctx->instance))
     {
         // 注意：freerdp_context_new 失败时，其内部 fail 分支会调用
         // freerdp_context_free()，该函数末尾会把 instance->context 置为
         // NULL。所以这里【绝对不能】再访问 _ctx->instance->context——
         // freerdp_get_last_error(NULL) 会因 WINPR_ASSERT 直接 abort 闪退。
-        // 失败原因只能靠 WLog 日志（已重定向到 rdp-wlog.log）来定位。
-        NSLog(@"[RDPBridge] freerdp_context_new 失败：instance->context 已被释放");
+        // 失败原因靠 winpr 原语自检（结果直接拼进弹窗，不依赖日志文件）。
+        NSString *diag = bridge_run_winpr_diag();
+        NSLog(@"[RDPBridge] freerdp_context_new 失败：%@", diag);
         [self teardownContext];
-        return @"无法初始化 RDP 客户端上下文（详见日志）";
+        return [NSString stringWithFormat:@"无法初始化 RDP 客户端上下文\n基线:%@\n失败后:%@",
+                                          _winprBaseline, diag];
     }
     _ctx->context = _ctx->instance->context;
 
