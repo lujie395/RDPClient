@@ -18,13 +18,18 @@
 #import <freerdp/gdi/gdi.h>
 #import <freerdp/input.h>
 #import <freerdp/error.h>
+#import <freerdp/settings.h>
 #import <winpr/synch.h>
 #import <winpr/wlog.h>
 #import <winpr/collections.h>
 #import <winpr/environment.h>
+#import <winpr/path.h>
+#import <winpr/sysinfo.h>
+#import <winpr/rpc.h>
 
 #import <openssl/opensslv.h>
 #import <openssl/provider.h>
+#import <openssl/rand.h>
 
 #import <map>
 #import <mutex>
@@ -37,6 +42,8 @@
 #import <fcntl.h>
 #import <unistd.h>
 #import <errno.h>
+#import <stdlib.h>
+#import <time.h>
 #import <UIKit/UIKit.h>
 
 NSString * const RDPBridgeErrorDomain = @"RDPBridgeErrorDomain";
@@ -87,6 +94,90 @@ static NSString *bridge_run_winpr_diag(void)
     NSString *logPath = [NSTemporaryDirectory() stringByAppendingPathComponent:@"wlog/rdp-wlog.log"];
     BOOL logExists = [[NSFileManager defaultManager] fileExistsAtPath:logPath];
     [d appendFormat:@"LogFile:%@", logExists ? @"ok" : @"none"];
+
+    return d;
+}
+
+// 分步诊断：按 freerdp_context_new 的内部依赖链逐层探测。
+// Linux 实验已证明：环境贫瘠（如 HOME 缺失）时 settings_new 会静默
+// goto out_fail（无任何日志）。这里把每一层依赖用 public API 跑一遍，
+// 弹窗直接报告哪一层失败。
+static NSString *bridge_run_context_diag(void)
+{
+    NSMutableString *d = [NSMutableString string];
+
+    // 1. 环境变量（iOS 沙盒进程环境极简，winpr 非 __IOS__ 分支读 HOME/TMPDIR）
+    const char *home = getenv("HOME");
+    const char *tmpdir = getenv("TMPDIR");
+    [d appendFormat:@"env[HOME:%@ TMPDIR:%@] ",
+                   home ? @"set" : @"NULL", tmpdir ? @"set" : @"NULL"];
+
+    // 2. GetKnownPath 全系列（settings_new 里 HomePath/ConfigPath 的来源）
+    {
+        const eKnownPathTypes ids[] = {
+            KNOWN_PATH_HOME,           KNOWN_PATH_TEMP,
+            KNOWN_PATH_XDG_CONFIG_HOME, KNOWN_PATH_XDG_DATA_HOME,
+            KNOWN_PATH_XDG_CACHE_HOME,  KNOWN_PATH_XDG_RUNTIME_DIR,
+            KNOWN_PATH_SYSTEM_CONFIG_HOME
+        };
+        const char *names[] = { "home", "tmp", "cfg", "data", "cache", "rtdir", "syscfg" };
+        [d appendString:@"paths["];
+        for (size_t i = 0; i < sizeof(ids) / sizeof(ids[0]); i++)
+        {
+            char *p = GetKnownPath(ids[i]);
+            [d appendFormat:@"%s:%@ ", names[i],
+                             p ? @"ok" : @"NULL"];
+            free(p);
+        }
+        [d appendString:@"] "];
+    }
+
+    // 3. 计算机名（settings_init_computer_name 的依赖）
+    {
+        CHAR cn[MAX_COMPUTERNAME_LENGTH + 1] = { 0 };
+        DWORD cnLen = (DWORD)sizeof(cn);
+        BOOL cnOk = GetComputerNameExA(ComputerNameNetBIOS, cn, &cnLen);
+        [d appendFormat:@"CompName:%@ ", cnOk ? @"ok" : @"FAIL"];
+    }
+
+    // 4. OpenSSL RAND（UuidCreate 的依赖，settings_new 末尾会用到）
+    {
+        unsigned char buf[16] = { 0 };
+        int randOk = (RAND_bytes(buf, (int)sizeof(buf)) == 1);
+        [d appendFormat:@"RAND:%@ ", randOk ? @"ok" : @"FAIL"];
+    }
+
+    // 5. UuidCreate（settings_new 尾部的静默 out_fail 点）
+    {
+        UUID uuid;
+        RPC_STATUS us = UuidCreate(&uuid);
+        [d appendFormat:@"Uuid:%@ ", (us == RPC_S_OK) ? @"ok" : @"FAIL"];
+    }
+
+    // 6. 核心：freerdp_settings_new —— context_new 内 rdp_new 的第一步实质依赖。
+    //    若它 FAIL 而 2~5 全 ok，失败点在 settings_new 内部其它分支；
+    //    若它 ok，失败点在 rdp_new 后半 / channels / stream_dump 等更深处。
+    {
+        rdpSettings *st = freerdp_settings_new(0);
+        [d appendFormat:@"settings_new:%@ ", st ? @"ok" : @"FAIL"];
+        if (st)
+            freerdp_settings_free(st);
+    }
+
+    // 7. 独立实例重试一次完整 context_new：
+    //    与主流程相同的调用、独立的 instance。若它 ok 而主流程 FAIL，
+    //    说明是时序/一次性初始化问题；若同样 FAIL，是确定性失败。
+    {
+        freerdp *probe = freerdp_new();
+        if (probe)
+        {
+            BOOL probeOk = freerdp_context_new(probe);
+            [d appendFormat:@"probe_ctx:%@", probeOk ? @"ok" : @"FAIL"];
+            if (probeOk)
+                freerdp_context_free(probe);
+            freerdp_free(probe);
+        }
+    }
 
     return d;
 }
@@ -291,6 +382,11 @@ static BOOL bridge_authenticate_ex(freerdp *instance, char **username, char **pa
     // 诊断：context_new 之前的 winpr 原语基线（失败时拼进弹窗）
     NSString *_winprBaseline;
 
+    // 内部方法
+- (void)prepareProcessEnvironment;
+- (void)setupWLogCapture;
+- (NSString *)attemptConnectWithConfig:(NSDictionary *)config profile:(int)profile;
+
     // 以下为内部状态（对外只读，通过 getter 方法暴露，不使用属性合成）
     RDPBridgeState _state;
     NSString *_lastErrorMessage;
@@ -412,8 +508,9 @@ static BOOL bridge_authenticate_ex(freerdp *instance, char **username, char **pa
 {
     @autoreleasepool
     {
-        // FreeRDP 底层日志：重定向 stderr 到文件 + 打开 DEBUG 级别，
+        // 进程环境准备 + FreeRDP 底层日志：FileAppender 到文件 + DEBUG 级别，
         // 失败时（failWithMessage）把日志尾部复制进剪贴板供排障。
+        [self prepareProcessEnvironment];
         [self setupWLogCapture];
 
         // ---- TCP 预检：区分「网络层不通」与「RDP/TLS 协商失败」----
@@ -452,6 +549,36 @@ static BOOL bridge_authenticate_ex(freerdp *instance, char **username, char **pa
 
         [self setState:RDPBridgeStateDisconnected message:nil];
         [self teardownContext];
+    }
+}
+
+// 进程环境准备：补齐 winpr/freerdp 隐式依赖的环境变量。
+//
+// 根因（Linux 复现实验确认）：freerdp_settings_new 内部依赖
+// GetKnownPath(KNOWN_PATH_HOME) 等路径探测；当 HOME 环境变量缺失
+// （且 __IOS__ 未定义走 GetEnvAlloc("HOME") 分支）时，HomePath 为
+// NULL，settings_new 直接 goto out_fail —— 整个过程【零日志】，
+// 表现为 freerdp_context_new 静默失败。
+// env -i 复现：缺 HOME → context_new FAIL；补 HOME/TMPDIR → ok。
+- (void)prepareProcessEnvironment
+{
+    static BOOL prepared = NO;
+    if (prepared)
+        return;
+    prepared = YES;
+
+    if (!getenv("HOME"))
+        setenv("HOME", NSHomeDirectory().fileSystemRepresentation, 1);
+    if (!getenv("TMPDIR"))
+        setenv("TMPDIR", NSTemporaryDirectory().fileSystemRepresentation, 1);
+    if (!getenv("TZ"))
+    {
+        // iOS 无 /etc/localtime、/usr/share/zoneinfo，winpr timezone 探测链
+        // 全部静默失败。显式设 TZ 让第一来源（winpr_time_zone_from_env）
+        // 直接命中，DynamicDSTTimeZoneKeyName 才能正常填充。
+        NSString *tz = [NSTimeZone localTimeZone].name ?: @"Asia/Shanghai";
+        setenv("TZ", tz.fileSystemRepresentation, 1);
+        tzset();
     }
 }
 
@@ -621,12 +748,12 @@ static BOOL bridge_authenticate_ex(freerdp *instance, char **username, char **pa
         // freerdp_context_free()，该函数末尾会把 instance->context 置为
         // NULL。所以这里【绝对不能】再访问 _ctx->instance->context——
         // freerdp_get_last_error(NULL) 会因 WINPR_ASSERT 直接 abort 闪退。
-        // 失败原因靠 winpr 原语自检（结果直接拼进弹窗，不依赖日志文件）。
-        NSString *diag = bridge_run_winpr_diag();
-        NSLog(@"[RDPBridge] freerdp_context_new 失败：%@", diag);
+        // 失败原因靠分步诊断（结果直接拼进弹窗，不依赖日志文件）。
+        NSString *diag = bridge_run_context_diag();
+        NSLog(@"[RDPBridge] freerdp_context_new 失败，分步诊断：%@", diag);
         [self teardownContext];
-        return [NSString stringWithFormat:@"无法初始化 RDP 客户端上下文\n基线:%@\n失败后:%@",
-                                          _winprBaseline, diag];
+        return [NSString stringWithFormat:@"无法初始化 RDP 客户端上下文\n诊断:%@\n基线:%@",
+                                          diag, _winprBaseline];
     }
     _ctx->context = _ctx->instance->context;
 
