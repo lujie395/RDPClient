@@ -46,6 +46,7 @@ targets:
           - "$(SRCROOT)/build/$(PLATFORM_NAME)/include"
           - "$(SRCROOT)/build/$(PLATFORM_NAME)/winpr/include"
           - "$(SRCROOT)/build/$(PLATFORM_NAME)/freerdp/include"
+          - "$(SRCROOT)/third-party/openssl/$(PLATFORM_NAME)/include"
     dependencies:
       - sdk: Security.framework
       - sdk: VideoToolbox.framework
