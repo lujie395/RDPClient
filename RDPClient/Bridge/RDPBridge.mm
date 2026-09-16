@@ -379,10 +379,15 @@ static BOOL bridge_authenticate_ex(freerdp *instance, char **username, char **pa
         _savedDomain = [config[@"domain"] copy];
 
         // ---- 配置 settings ----
-        // 直接用类型化 setter（freerdp_settings_set_string/uint16/uint32/bool）。
+        // 直接用类型化 setter（freerdp_settings_set_string/uint32/bool）。
         // 不用 freerdp_settings_set_value_for_name：它依赖编译期生成的
         // 「名字 -> key」映射表，裁剪版 FreeRDP（关闭 H264/FFmpeg 等）下
         // 部分 key 不在表里，会莫名返回 FALSE。
+        // 注意：3.x 的 key 是按值类型分组的强类型枚举，key 类型必须与 setter 对应。
+        NSString *nsHost = config[@"host"] ?: @"";
+        NSString *nsUser = config[@"username"] ?: @"";
+        NSString *nsPass = config[@"password"] ?: @"";
+        NSString *nsDomain = config[@"domain"] ?: @"";
         NSString *nsPort = [config[@"port"] stringValue];
         NSString *nsW = [config[@"width"] stringValue];
         NSString *nsH = [config[@"height"] stringValue];
@@ -403,15 +408,15 @@ static BOOL bridge_authenticate_ex(freerdp *instance, char **username, char **pa
     } while (0)
 
         BRIDGE_SET(freerdp_settings_set_string(settings, FreeRDP_ServerHostname,
-                                               config[@"host"].UTF8String ?: ""));
-        BRIDGE_SET(freerdp_settings_set_uint16(settings, FreeRDP_ServerPort,
-                                               (UINT16)nsPort.intValue));
+                                               nsHost.UTF8String ?: ""));
+        BRIDGE_SET(freerdp_settings_set_uint32(settings, FreeRDP_ServerPort,
+                                               (UINT32)nsPort.intValue));
         BRIDGE_SET(freerdp_settings_set_string(settings, FreeRDP_Username,
-                                               config[@"username"].UTF8String ?: ""));
+                                               nsUser.UTF8String ?: ""));
         BRIDGE_SET(freerdp_settings_set_string(settings, FreeRDP_Password,
-                                               config[@"password"].UTF8String ?: ""));
+                                               nsPass.UTF8String ?: ""));
         BRIDGE_SET(freerdp_settings_set_string(settings, FreeRDP_Domain,
-                                               config[@"domain"].UTF8String ?: ""));
+                                               nsDomain.UTF8String ?: ""));
         BRIDGE_SET(freerdp_settings_set_uint32(settings, FreeRDP_DesktopWidth,
                                                (UINT32)nsW.intValue));
         BRIDGE_SET(freerdp_settings_set_uint32(settings, FreeRDP_DesktopHeight,
@@ -425,7 +430,7 @@ static BOOL bridge_authenticate_ex(freerdp *instance, char **username, char **pa
         BRIDGE_SET(freerdp_settings_set_bool(settings, FreeRDP_NetworkAutoDetect, FALSE));
         BRIDGE_SET(freerdp_settings_set_bool(settings, FreeRDP_AudioPlayback, FALSE));
         BRIDGE_SET(freerdp_settings_set_bool(settings, FreeRDP_AudioCapture, FALSE));
-        BRIDGE_SET(freerdp_settings_set_bool(settings, FreeRDP_FontSmoothing, TRUE));
+        BRIDGE_SET(freerdp_settings_set_bool(settings, FreeRDP_AllowFontSmoothing, TRUE));
         BRIDGE_SET(freerdp_settings_set_uint32(settings, FreeRDP_KeyboardLayout, 0x0409)); // en-US
 #undef BRIDGE_SET
 
