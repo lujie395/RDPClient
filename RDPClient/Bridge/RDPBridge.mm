@@ -451,6 +451,7 @@ static BOOL bridge_authenticate_ex(freerdp *instance, char **username, char **pa
             }
         }
     }
+}
 
 // TCP 连通性预探（非阻塞 connect + select 超时）
 - (BOOL)tcpProbe:(NSString *)host
