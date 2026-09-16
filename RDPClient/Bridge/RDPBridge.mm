@@ -46,7 +46,6 @@
 #import <errno.h>
 #import <stdlib.h>
 #import <time.h>
-#import <sys/random.h>
 #import <UIKit/UIKit.h>
 
 NSString * const RDPBridgeErrorDomain = @"RDPBridgeErrorDomain";
