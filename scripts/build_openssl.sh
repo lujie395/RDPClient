@@ -59,11 +59,19 @@ build() {
       "-mios-version-min=$MIN_IOS" >/dev/null
     make -j"$(sysctl -n hw.ncpu)" build_sw >/dev/null
     make install_sw >/dev/null
-    # 自检：确认 legacy provider 入口真的进了 libcrypto.a
-    if ! nm -g "$outdir/lib/libcrypto.a" 2>/dev/null | grep -q "ossl_legacy_provider_init"; then
+    # 自检：确认 legacy provider 入口真的进了 libcrypto.a。
+    # 注意 1：不能写 `nm | grep -q`——本脚本开了 pipefail，grep -q 命中后
+    #   立即退出，nm 收到 SIGPIPE 以 141 退出，整条管道被判失败，
+    #   导致符号明明存在也误报「未找到」。必须先落盘再查。
+    # 注意 2：nm 对 Apple 归档可能返回非零退出码，用 || true 兜住；
+    #   判定结果以 grep 是否命中为准。
+    nm "$outdir/lib/libcrypto.a" > "$builddir/nm-symbols.txt" 2>/dev/null || true
+    if ! grep -q "ossl_legacy_provider_init" "$builddir/nm-symbols.txt"; then
       echo "错误：libcrypto.a 中未找到 ossl_legacy_provider_init（STATIC_LEGACY 未生效）" >&2
+      echo "提示：确认 Configure 选项包含 no-module" >&2
       exit 1
     fi
+    rm -f "$builddir/nm-symbols.txt"
   )
   echo "  -> $outdir/lib/libssl.a  libcrypto.a（含内置 legacy provider）"
 }
