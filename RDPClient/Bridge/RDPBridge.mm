@@ -30,6 +30,8 @@
 #import <openssl/opensslv.h>
 #import <openssl/provider.h>
 #import <openssl/rand.h>
+#import <openssl/err.h>
+#import <openssl/evp.h>
 
 #import <map>
 #import <mutex>
@@ -44,6 +46,7 @@
 #import <errno.h>
 #import <stdlib.h>
 #import <time.h>
+#import <sys/random.h>
 #import <UIKit/UIKit.h>
 
 NSString * const RDPBridgeErrorDomain = @"RDPBridgeErrorDomain";
@@ -98,6 +101,33 @@ static NSString *bridge_run_winpr_diag(void)
     return d;
 }
 
+// 显式激活 OpenSSL providers。
+// no-module 静态构建下 default provider 的【自动激活】不可靠：
+// 诊断证实 CTR-DRBG（default provider 内）fetch 不到 → RAND_bytes FAIL
+// → UuidCreate FAIL → freerdp_settings_new 静默 out_fail → context_new FAIL。
+// default（AES/SHA/DRBG，TLS 与随机数必需）+ legacy（MD4/RC4，NTLM 必需）
+// 都要手动加载。OSSL_PROVIDER_load 幂等，重复调用返回同一实例。
+static void bridge_load_openssl_providers(void)
+{
+#if OPENSSL_VERSION_NUMBER >= 0x30000000L
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        OSSL_PROVIDER *def = OSSL_PROVIDER_load(NULL, "default");
+        if (!def)
+            NSLog(@"[RDPBridge] 警告：default provider 加载失败（RAND/TLS 将不可用）");
+        OSSL_PROVIDER *legacy = OSSL_PROVIDER_load(NULL, "legacy");
+        if (!legacy)
+            NSLog(@"[RDPBridge] 警告：legacy provider 加载失败，NLA 认证将不可用");
+    });
+#endif
+}
+
+// 进程加载即执行（先于一切 OpenSSL 调用，包括 winpr 内部的）
+__attribute__((constructor)) static void rdpbridge_early_init(void)
+{
+    bridge_load_openssl_providers();
+}
+
 // 分步诊断：按 freerdp_context_new 的内部依赖链逐层探测。
 // Linux 实验已证明：环境贫瘠（如 HOME 缺失）时 settings_new 会静默
 // goto out_fail（无任何日志）。这里把每一层依赖用 public API 跑一遍，
@@ -140,11 +170,58 @@ static NSString *bridge_run_context_diag(void)
         [d appendFormat:@"CompName:%@ ", cnOk ? @"ok" : @"FAIL"];
     }
 
-    // 4. OpenSSL RAND（UuidCreate 的依赖，settings_new 末尾会用到）
+    // 4. 随机源分层探测（上一轮确认 RAND:FAIL → Uuid:FAIL → settings_new:FAIL，
+    //    现在拆开 OpenSSL DRBG 层与系统 entropy 层，定位确切失败点）
     {
+        [d appendString:@"rand["];
+
+        // 4a. OpenSSL RAND_bytes + ERR 错误队列（失败原因的直接证据）
+        ERR_clear_error();
         unsigned char buf[16] = { 0 };
-        int randOk = (RAND_bytes(buf, (int)sizeof(buf)) == 1);
-        [d appendFormat:@"RAND:%@ ", randOk ? @"ok" : @"FAIL"];
+        int r = RAND_bytes(buf, (int)sizeof(buf));
+        unsigned long e = ERR_get_error();
+        if (r == 1)
+        {
+            [d appendString:@"bytes:ok "];
+        }
+        else
+        {
+            char es[192] = { 0 };
+            ERR_error_string_n(e, es, sizeof(es));
+            [d appendFormat:@"bytes:FAIL(0x%lX %s) ", (unsigned long)e,
+                             es[0] ? es : "no-err"];
+        }
+
+        // 4b. CTR-DRBG 算法能否从 default provider fetch
+        {
+            EVP_RAND *drbg = EVP_RAND_fetch(NULL, "CTR-DRBG", NULL);
+            [d appendFormat:@"drbg:%@ ", drbg ? @"ok" : @"FAIL"];
+            if (drbg)
+                EVP_RAND_free(drbg);
+        }
+
+        // 4c. 系统随机源直测（区分「OpenSSL 层坏」还是「系统层坏」）
+        {
+            uint8_t sb[16] = { 0 };
+            int ge = getentropy(sb, sizeof(sb));
+            [d appendFormat:@"getentropy:%@ ", ge == 0 ? @"ok" : @"FAIL"];
+        }
+        {
+            int fd = open("/dev/urandom", O_RDONLY);
+            if (fd >= 0)
+            {
+                ssize_t rd = read(fd, buf, sizeof(buf));
+                close(fd);
+                [d appendFormat:@"urandom:%@ ", rd == (ssize_t)sizeof(buf) ? @"ok" : @"FAIL"];
+            }
+            else
+            {
+                [d appendFormat:@"urandom:OPEN_FAIL(errno=%d) ", errno];
+            }
+        }
+
+        // 4d. RAND_status（1=已就绪 0=未就绪）
+        [d appendFormat:@"status:%d]", RAND_status()];
     }
 
     // 5. UuidCreate（settings_new 尾部的静默 out_fail 点）
@@ -585,19 +662,9 @@ static BOOL bridge_authenticate_ex(freerdp *instance, char **username, char **pa
 
 - (void)setupWLogCapture
 {
-    // OpenSSL 3.x 把 MD4/RC4（NTLM 必需）移入 legacy provider。
-    // 编译 OpenSSL 时已加 no-module：legacy provider 以 STATIC_LEGACY
-    // 方式内置进 libcrypto.a（含 ossl_legacy_provider_init 入口），
-    // 这里主动加载一次即可；winpr 之后加载同名 provider 会直接复用。
-    // 缺了它：NLA/CredSSP 认证必然失败（SEC_E_NO_CREDENTIALS）。
-#if OPENSSL_VERSION_NUMBER >= 0x30000000L
-    static dispatch_once_t onceToken;
-    dispatch_once(&onceToken, ^{
-        OSSL_PROVIDER *legacy = OSSL_PROVIDER_load(NULL, "legacy");
-        if (!legacy)
-            NSLog(@"[RDPBridge] 警告：legacy provider 加载失败，NLA 认证将不可用");
-    });
-#endif
+    // OpenSSL providers 已在 rdpbridge_early_init（constructor）加载；
+    // 这里兜底再调一次（幂等），并保持日志行为。
+    bridge_load_openssl_providers();
 
     // WinPR 的 ConsoleAppender 在 iOS 沙盒里几乎没用（stdout/stderr
     // 不指向文件，且 DEBUG/INFO 走 stdout、ERROR/WARN 走 stderr 分裂）。
