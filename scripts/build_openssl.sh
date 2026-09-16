@@ -47,23 +47,25 @@ build() {
   mkdir -p "$builddir"
   (
     cd "$builddir"
-    # no-shared：静态库；no-tests：跳过测试代码；no-docs：跳过文档
+    # no-shared：静态库；no-module：禁用动态 provider 模块。
+    #   关键：模块模式（默认）下 legacyprov.c（provider 入口）不会编进
+    #   liblegacy.a，链接必失败（ossl_legacy_provider_init undefined）。
+    #   加 no-module 后走 STATIC_LEGACY 分支：legacy provider（MD4/RC4，
+    #   NTLM 必需）连同入口函数全部内置进 libcrypto.a。
+    # no-tests：跳过测试代码；no-docs：跳过文档
     perl "$SRC/Configure" "$target" \
-      no-shared no-tests no-docs \
+      no-shared no-module no-tests no-docs \
       "--prefix=$outdir" \
       "-mios-version-min=$MIN_IOS" >/dev/null
     make -j"$(sysctl -n hw.ncpu)" build_sw >/dev/null
     make install_sw >/dev/null
-    # 关键：legacy provider（MD4/RC4/NTLM 必需）在静态构建下是独立的
-    # liblegacy.a，install_sw 不会安装，必须手动拷贝。
-    # 没有 it：NLA/CredSSP 认证必然失败（NTLM 哈希依赖 MD4）。
-    if [ ! -f "$builddir/providers/liblegacy.a" ]; then
-      echo "错误：未生成 providers/liblegacy.a（legacy provider）" >&2
+    # 自检：确认 legacy provider 入口真的进了 libcrypto.a
+    if ! nm -g "$outdir/lib/libcrypto.a" 2>/dev/null | grep -q "ossl_legacy_provider_init"; then
+      echo "错误：libcrypto.a 中未找到 ossl_legacy_provider_init（STATIC_LEGACY 未生效）" >&2
       exit 1
     fi
-    cp -v "$builddir/providers/liblegacy.a" "$outdir/lib/liblegacy.a"
   )
-  echo "  -> $outdir/lib/libssl.a  libcrypto.a  liblegacy.a"
+  echo "  -> $outdir/lib/libssl.a  libcrypto.a（含内置 legacy provider）"
 }
 
 build "iphoneos"        "ios64-xcrun"

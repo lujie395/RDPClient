@@ -36,7 +36,7 @@ targets:
         SWIFT_OBJC_BRIDGING_HEADER: RDPClient/Bridge/RDPClient-Bridging-Header.h
         CODE_SIGN_STYLE: Automatic
         ENABLE_USER_SCRIPT_SANDBOXING: false
-        OTHER_LDFLAGS: "-lfreerdp -lwinpr -lssl -llegacy -lcrypto"
+        OTHER_LDFLAGS: "-lfreerdp -lwinpr -lssl -lcrypto"
         LIBRARY_SEARCH_PATHS:
           - "$(SRCROOT)/build/dist-$(PLATFORM_NAME)"
           - "$(SRCROOT)/third-party/openssl/$(PLATFORM_NAME)/lib"

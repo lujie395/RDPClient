@@ -24,11 +24,6 @@
 #import <openssl/opensslv.h>
 #import <openssl/provider.h>
 
-// liblegacy.a（静态 legacy provider）的 C 入口符号。
-// 必须用 extern "C" 声明——否则 ObjC++ 按 C++ 规则 name-mangle，
-// 链接时找不到符号。
-extern "C" OSSL_provider_init_fn ossl_legacy_provider_init;
-
 #import <map>
 #import <mutex>
 #import <string>
@@ -415,13 +410,17 @@ static BOOL bridge_authenticate_ex(freerdp *instance, char **username, char **pa
 
 - (void)setupWLogCapture
 {
-    // 静态链接时 liblegacy.a（MD4/RC4，NTLM 必需）不会自动加载，
-    // 必须在任何 OpenSSL/FreeRDP 初始化之前显式注册为内置 provider。
+    // OpenSSL 3.x 把 MD4/RC4（NTLM 必需）移入 legacy provider。
+    // 编译 OpenSSL 时已加 no-module：legacy provider 以 STATIC_LEGACY
+    // 方式内置进 libcrypto.a（含 ossl_legacy_provider_init 入口），
+    // 这里主动加载一次即可；winpr 之后加载同名 provider 会直接复用。
     // 缺了它：NLA/CredSSP 认证必然失败（SEC_E_NO_CREDENTIALS）。
 #if OPENSSL_VERSION_NUMBER >= 0x30000000L
     static dispatch_once_t onceToken;
     dispatch_once(&onceToken, ^{
-        OSSL_PROVIDER_add_builtin(NULL, "legacy", ossl_legacy_provider_init);
+        OSSL_PROVIDER *legacy = OSSL_PROVIDER_load(NULL, "legacy");
+        if (!legacy)
+            NSLog(@"[RDPBridge] 警告：legacy provider 加载失败，NLA 认证将不可用");
     });
 #endif
 
