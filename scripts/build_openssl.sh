@@ -54,8 +54,16 @@ build() {
       "-mios-version-min=$MIN_IOS" >/dev/null
     make -j"$(sysctl -n hw.ncpu)" build_sw >/dev/null
     make install_sw >/dev/null
+    # 关键：legacy provider（MD4/RC4/NTLM 必需）在静态构建下是独立的
+    # liblegacy.a，install_sw 不会安装，必须手动拷贝。
+    # 没有 it：NLA/CredSSP 认证必然失败（NTLM 哈希依赖 MD4）。
+    if [ ! -f "$builddir/providers/liblegacy.a" ]; then
+      echo "错误：未生成 providers/liblegacy.a（legacy provider）" >&2
+      exit 1
+    fi
+    cp -v "$builddir/providers/liblegacy.a" "$outdir/lib/liblegacy.a"
   )
-  echo "  -> $outdir/lib/libssl.a  libcrypto.a"
+  echo "  -> $outdir/lib/libssl.a  libcrypto.a  liblegacy.a"
 }
 
 build "iphoneos"        "ios64-xcrun"

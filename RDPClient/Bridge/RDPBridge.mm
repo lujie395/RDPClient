@@ -21,6 +21,9 @@
 #import <winpr/synch.h>
 #import <winpr/wlog.h>
 
+#import <openssl/opensslv.h>
+#import <openssl/provider.h>
+
 #import <map>
 #import <mutex>
 #import <string>
@@ -407,6 +410,17 @@ static BOOL bridge_authenticate_ex(freerdp *instance, char **username, char **pa
 
 - (void)setupWLogCapture
 {
+    // 静态链接时 liblegacy.a（MD4/RC4，NTLM 必需）不会自动加载，
+    // 必须在任何 OpenSSL/FreeRDP 初始化之前显式注册为内置 provider。
+    // 缺了它：NLA/CredSSP 认证必然失败（SEC_E_NO_CREDENTIALS）。
+#if OPENSSL_VERSION_NUMBER >= 0x30000000L
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        extern OSSL_provider_init_fn OSSL_provider_init; // 来自 liblegacy.a
+        OSSL_PROVIDER_add_builtin(NULL, "legacy", OSSL_provider_init);
+    });
+#endif
+
     static BOOL redirected = NO;
     NSString *logPath = [NSTemporaryDirectory() stringByAppendingPathComponent:@"rdp-wlog.log"];
     freopen(logPath.fileSystemRepresentation, redirected ? "a" : "w", stderr);
@@ -590,11 +604,13 @@ static BOOL bridge_authenticate_ex(freerdp *instance, char **username, char **pa
         // ---- 安全层策略 ----
         if (profile >= 1)
         {
-            // profile 1：纯 TLS —— 不请求 NLA/CredSSP，直接走 TLS 加密登录
-            freerdp_settings_set_bool(settings, FreeRDP_NegotiateSecurityLayer, FALSE);
+            // profile 1：正常协商，但只提议 TLS（不请求 NLA/CredSSP）。
+            // 保持 NegotiateSecurityLayer=TRUE：完全关闭协商时 FreeRDP 发出的
+            // X.224 请求不带协议标志，Win11 24H2 会在 TLS 层直接回 alert。
+            // 服务器关闭 NLA 后会接受「仅 SSL」提议，走 TLS 加密的标准登录。
             freerdp_settings_set_bool(settings, FreeRDP_NlaSecurity, FALSE);
             freerdp_settings_set_bool(settings, FreeRDP_TlsSecurity, TRUE);
-            freerdp_settings_set_bool(settings, FreeRDP_UseRdpSecurityLayer, FALSE);
+            freerdp_settings_set_bool(settings, FreeRDP_RdpSecurity, FALSE);
         }
 
         if (!ok)
