@@ -58,10 +58,12 @@ FOUNDATION_EXPORT NSString * const RDPBridgeErrorDomain;
 /// 回调：状态变化（主线程）
 @property (nonatomic, copy, nullable) void (^stateHandler)(RDPBridgeState state,
                                                            NSString * _Nullable message);
-/// 回调：收到新帧（主线程；image 由回调内部释放，如需持有请 CFRetain/复制）
-@property (nonatomic, copy, nullable) void (^frameHandler)(CGImageRef image);
 /// 回调：远程桌面尺寸变化（主线程）
 @property (nonatomic, copy, nullable) void (^resizeHandler)(CGSize newSize);
+
+/// 拉取暂存的最新帧（渲染循环每帧调用；所有权转移给调用方，Swift 侧自动管理）。
+/// 无新帧返回 NULL。连续帧在桥接层自动合并，只保留最新一帧。
+- (nullable CGImageRef)takePendingFrame CF_RETURNS_RETAINED NS_SWIFT_NAME(takePendingFrame());
 
 /// 建立连接。同步校验参数并启动后台连接线程。
 /// @return NO 表示参数/状态非法（error 会带原因）

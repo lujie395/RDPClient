@@ -132,6 +132,16 @@ final class RDPViewController: UIViewController {
     private var lastMoveSentAt: TimeInterval = 0
     private var isKeyboardOn = false
 
+    /// 需要重新适配视口（新桌面尺寸 / 旋转后）；用户手动捏合缩放后置 false
+    private var needsFit = false
+
+    /// 帧渲染循环：每 vsync 从桥接层拉取最新帧（无新帧则跳过）
+    private var displayLink: CADisplayLink?
+
+    // MARK: 手势引用（delegate 需要按实例区分）
+    private var oneFingerPanRef: UIPanGestureRecognizer?
+    private var twoFingerPanRef: UIPanGestureRecognizer?
+
     // MARK: 生命周期
 
     override func viewDidLoad() {
@@ -141,21 +151,50 @@ final class RDPViewController: UIViewController {
         setupHiddenField()
         setupGestures()
         setupBridgeCallbacks()
+
+        // 渲染循环随视图生命周期运行（而非随连接）。
+        // 桌面尺寸变化（旋转 / DesktopResize）产生的帧不会被丢掉，
+        // 连接完成后第一帧也能立刻显示。
+        startRenderLoop()
+    }
+
+    override func viewDidAppear(_ animated: Bool) {
+        super.viewDidAppear(animated)
+        startRenderLoop()
     }
 
     override func viewDidLayoutSubviews() {
         super.viewDidLayoutSubviews()
-        // 只做居中，不重置缩放（避免覆盖用户的捏合缩放）
-        if desktopSize != .zero {
-            centerContent()
+        // 布局回调统一处理：初始布局、旋转、safeArea 变化都会走到这里。
+        // 缩放本身不能触发 fitAndCenter（会导致「每转一次缩小一次」的累积），
+        // 只有 needsFit 置位时才重新适配。
+        guard desktopSize != .zero else { return }
+        if needsFit {
+            needsFit = false
+            fitAndCenter()
+        } else {
+            centerContent(animated: false)
         }
     }
 
     override func viewWillTransition(to size: CGSize, with coordinator: any UIViewControllerTransitionCoordinator) {
         super.viewWillTransition(to: size, with: coordinator)
+        // 旋转：视口尺寸变了，重新适配（画面完整显示并居中，随屏幕方向转换）。
+        // 转屏时 safeArea 与导航栏高度也在变，若在转场开始时就算会用到旧 bounds，
+        // 所以放到转场结束、布局稳定后再执行。
         coordinator.animate(alongsideTransition: nil) { [weak self] _ in
-            self?.fitAndCenter()
+            guard let self else { return }
+            self.view.layoutIfNeeded()
+            self.needsFit = true
+            self.view.setNeedsLayout()
         }
+    }
+
+    override func viewWillDisappear(_ animated: Bool) {
+        super.viewWillDisappear(animated)
+        // 只停渲染循环，不动连接：连接的生命周期由 SessionController 管
+        // （断开按钮 -> session.disconnect()，退出页面 -> onDisappear）。
+        stopRenderLoop()
     }
 
     // MARK: 对外动作
@@ -170,10 +209,15 @@ final class RDPViewController: UIViewController {
         var width = host.desktopWidth
         var height = host.desktopHeight
         if width == 0 || height == 0 {
-            // 自动分辨率：当前视口 × 屏幕像素密度（不超过 4K）
-            let scale = view.window?.screen.scale ?? 2
-            width = min(UInt32(max(1024, view.bounds.width * scale)), 3840)
-            height = min(UInt32(max(768, view.bounds.height * scale)), 2160)
+            // 自动分辨率：跟随当前屏幕方向的逻辑分辨率。
+            // 不乘 scale —— 桌面尺寸越大，服务端编码与网络压力越大，
+            // 而手机屏幕本来就小，逻辑分辨率已经足够清晰。
+            // 用 windowScene.screen（而非已废弃的 UIScreen.main）拿方向敏感的尺寸：
+            // 竖屏时 bounds 高 > 宽，横屏时已自动交换。
+            let screen = view.window?.windowScene?.screen ?? UIScreen.main
+            let pts = screen.bounds.size
+            width = min(UInt32(max(640, Int(pts.width.rounded()))), 2560)
+            height = min(UInt32(max(480, Int(pts.height.rounded()))), 1600)
         }
 
         do {
@@ -181,6 +225,7 @@ final class RDPViewController: UIViewController {
                                      username: host.username, password: password,
                                      domain: host.domain, desktopWidth: UInt(width),
                                      desktopHeight: UInt(height))
+            // 渲染循环在 viewDidLoad 已启动，这里不再重复启动
         } catch {
             onStateChange?(.failed, error.localizedDescription)
         }
@@ -202,6 +247,7 @@ final class RDPViewController: UIViewController {
 
     func setInteractionMode(_ mode: TouchInputMapper.InteractionMode) {
         interactionMode = mode
+        setScrollPanEnabled(mode == .pan)
     }
 
     func sendSpecialKey(_ key: RDPKey) {
@@ -229,11 +275,14 @@ final class RDPViewController: UIViewController {
         scrollView.showsVerticalScrollIndicator = false
         scrollView.showsHorizontalScrollIndicator = false
         scrollView.delegate = self
-        // 三指拖动 = 平移视口；一指/两指留给鼠标移动与滚轮
-        scrollView.panGestureRecognizer.minimumNumberOfTouches = 3
-        scrollView.panGestureRecognizer.maximumNumberOfTouches = 3
+        // UIScrollView 自带 pan 的触点数由 setScrollPanEnabled 统一设置
+        // （mouse 模式直接禁用，避免与单指移动光标抢事件）。
         scrollView.minimumZoomScale = 0.1
         scrollView.maximumZoomScale = 5
+        // 点击延迟：UIScrollView 在存在 pan/pinch 时需要等约 150ms 才能判断
+        // 「这是点击还是拖动」。禁用其内部 pan 延迟判定，单击立刻下发。
+        scrollView.delaysContentTouches = false
+        scrollView.canCancelContentTouches = true
         scrollView.translatesAutoresizingMaskIntoConstraints = false
         view.addSubview(scrollView)
 
@@ -273,6 +322,13 @@ final class RDPViewController: UIViewController {
     }
 
     private func setupGestures() {
+        // UIScrollView 自带 pinch（缩放）与 pan（平移）手势。
+        // 注意：UIScrollView 一旦识别过 pinch/pan，内部的 delayed touches 机制
+        // 会让点击延迟约 150ms；而自定义手势若与它冲突，还可能整片吞掉点击。
+        // 所以这里：自带 pan 在 mouse 模式关闭（平移改由三指触发），
+        // pinch 保留给缩放，其余自定义手势只补 UIScrollView 没有的语义。
+        setScrollPanEnabled(interactionMode == .pan)
+
         let doubleTap = UITapGestureRecognizer(target: self, action: #selector(handleDoubleTap(_:)))
         doubleTap.numberOfTapsRequired = 2
 
@@ -285,70 +341,149 @@ final class RDPViewController: UIViewController {
         let longPress = UILongPressGestureRecognizer(target: self, action: #selector(handleLongPress(_:)))
         longPress.minimumPressDuration = 0.5
 
-        let oneFingerPan = UIPanGestureRecognizer(target: self, action: #selector(handleOneFingerPan(_:)))
-        oneFingerPan.minimumNumberOfTouches = 1
-        oneFingerPan.maximumNumberOfTouches = 1
+        // 三指平移视口：不参与 pinch 的触点数，和缩放/点击都无冲突
+        let threeFingerPan = UIPanGestureRecognizer(target: self, action: #selector(handleThreeFingerPan(_:)))
+        threeFingerPan.minimumNumberOfTouches = 3
+        threeFingerPan.maximumNumberOfTouches = 3
 
+        // 双指拖动 = 远程滚轮
         let twoFingerPan = UIPanGestureRecognizer(target: self, action: #selector(handleTwoFingerPan(_:)))
         twoFingerPan.minimumNumberOfTouches = 2
         twoFingerPan.maximumNumberOfTouches = 2
+        // 双指拖动与 pinch 同为双指起手，必须允许同时识别，
+        // 否则稍微有点方向差异就会被 pinch 抢占，滚轮时灵时不灵
+        twoFingerPan.delegate = self
 
-        [doubleTap, singleTap, twoFingerTap, longPress, oneFingerPan, twoFingerPan]
+        // 单指拖动移动远程光标
+        let oneFingerPan = UIPanGestureRecognizer(target: self, action: #selector(handleOneFingerPan(_:)))
+        oneFingerPan.minimumNumberOfTouches = 1
+        oneFingerPan.maximumNumberOfTouches = 1
+        oneFingerPan.delegate = self
+
+        [doubleTap, singleTap, twoFingerTap, longPress, threeFingerPan, twoFingerPan, oneFingerPan]
             .forEach { scrollView.addGestureRecognizer($0) }
+
+        oneFingerPanRef = oneFingerPan
+        twoFingerPanRef = twoFingerPan
+    }
+
+    /// 切换 UIScrollView 自带 pan（平移）的启用状态。
+    /// mouse 模式下关闭它，避免和「单指移动光标」抢事件。
+    private func setScrollPanEnabled(_ enabled: Bool) {
+        scrollView.panGestureRecognizer.isEnabled = enabled
+        if enabled {
+            scrollView.panGestureRecognizer.minimumNumberOfTouches = 3
+            scrollView.panGestureRecognizer.maximumNumberOfTouches = 3
+        }
     }
 
     private func setupBridgeCallbacks() {
         bridge.stateHandler = { [weak self] state, message in
             self?.onStateChange?(state, message)
         }
-        bridge.frameHandler = { [weak self] image in
-            self?.handleFrame(image)
-        }
         bridge.resizeHandler = { [weak self] size in
             self?.configureDesktop(size)
         }
     }
 
-    // MARK: 帧与桌面尺寸
+    // MARK: 帧渲染循环（CADisplayLink 拉取模式）
 
-    private func handleFrame(_ image: CGImage) {
-        if desktopSize == .zero {
+    /// 开始渲染循环。桥接层把最新帧存入 pending，这里每 vsync 拉取一次：
+    /// 无帧堆积、跳过重复帧，主线程永远只渲染最新画面。
+    private func startRenderLoop() {
+        guard displayLink == nil else { return }
+        let link = CADisplayLink(target: self, selector: #selector(pullFrame))
+        link.add(to: .main, forMode: .common)
+        displayLink = link
+    }
+
+    private func stopRenderLoop() {
+        displayLink?.invalidate()
+        displayLink = nil
+    }
+
+    @objc private func pullFrame() {
+        // takePendingFrame 标注 CF_RETURNS_RETAINED，Swift 自动接管引用计数
+        guard let image = bridge.takePendingFrame() else { return }
+        if desktopSize == .zero ||
+           desktopSize.width != CGFloat(image.width) ||
+           desktopSize.height != CGFloat(image.height) {
             configureDesktop(CGSize(width: image.width, height: image.height))
         }
         screenView.updateImage(image)
     }
 
+    // MARK: 帧与桌面尺寸
+
     private func configureDesktop(_ size: CGSize) {
         guard size.width > 0, size.height > 0 else { return }
+        let sizeChanged = (size != desktopSize)
         desktopSize = size
-        let origin = screenView.frame.origin
-        screenView.frame = CGRect(origin: origin, size: size)
-        scrollView.contentSize = size
-        fitAndCenter()
+        if sizeChanged {
+            // 先撤掉旧的缩放，再换尺寸：
+            // 否则 zoomScale 会按新 contentSize 重新换算，把画面放大到超出屏幕
+            scrollView.minimumZoomScale = 0.01
+            scrollView.maximumZoomScale = 1
+            scrollView.zoomScale = 1
+            screenView.frame = CGRect(origin: .zero, size: size)
+            screenView.center = CGPoint(x: size.width / 2, y: size.height / 2)
+            scrollView.contentSize = size
+            resetContentInset()
+        }
+        needsFit = true
+        // 尺寸变化通常伴随布局未完成（如旋转动画中），强制走一遍布局回调
+        view.setNeedsLayout()
+        view.layoutIfNeeded()
     }
 
     /// 让远程画面完整适配当前视口并居中
     private func fitAndCenter() {
-        guard desktopSize.width > 0, desktopSize.height > 0, scrollView.bounds.width > 0 else { return }
-        let fit = min(scrollView.bounds.width / desktopSize.width,
-                      scrollView.bounds.height / desktopSize.height)
-        scrollView.minimumZoomScale = fit / 4
-        scrollView.maximumZoomScale = 5
+        guard desktopSize.width > 0, desktopSize.height > 0,
+              scrollView.bounds.width > 10, scrollView.bounds.height > 10 else { return }
+        let boundsW = scrollView.bounds.width
+        let boundsH = scrollView.bounds.height
+        let fit = min(boundsW / desktopSize.width, boundsH / desktopSize.height)
+        // 先更新缩放边界，再设 zoomScale（否则会被旧的 min/max 截断——
+        // 这正是之前画面缩放/位置错乱的原因）
+        scrollView.minimumZoomScale = fit * 0.5
+        scrollView.maximumZoomScale = max(5, fit * 8)
         scrollView.zoomScale = fit
-        centerContent()
+        resetContentInset()
+        centerContent(animated: false)
     }
 
-    /// 缩放后画面小于视口时保持居中
-    private func centerContent() {
-        var inset = scrollView.contentInset
-        let bounds = scrollView.bounds.inset(by: inset).size
-        let contentWidth = desktopSize.width * scrollView.zoomScale
-        let contentHeight = desktopSize.height * scrollView.zoomScale
+    /// 清空 contentInset。
+    /// UIScrollView 的 contentInset 会参与 zoomScale 的换算，
+    /// 用它做居中会在缩放时累积
+    ///   scale = (bounds - 2*inset) / bounds
+    /// 的误差，表现为每旋转一次画面就缩小一点、越转越偏。
+    /// 居中改用 screenView.center 直接定位（见 centerContent），与缩放无关。
+    private func resetContentInset() {
+        if scrollView.contentInset != .zero {
+            scrollView.contentInset = .zero
+        }
+    }
 
-        inset.left = contentWidth < bounds.width ? (bounds.width - contentWidth) / 2 : 0
-        inset.top = contentHeight < bounds.height ? (bounds.height - contentHeight) / 2 : 0
-        if scrollView.contentInset != inset {
-            scrollView.contentInset = inset
+    /// 缩放后画面小于视口时保持居中。
+    /// 直接移动 screenView 的中心点：不参与 UIScrollView 的缩放换算，结果精确。
+    /// 画面大于视口时（用户放大后）清除位移，交回正常的滚动行为。
+    private func centerContent(animated: Bool) {
+        guard desktopSize.width > 0, desktopSize.height > 0 else { return }
+        let zoom = scrollView.zoomScale
+        guard zoom > 0 else { return }
+        let visible = scrollView.bounds.size
+        let contentW = desktopSize.width * zoom
+        let contentH = desktopSize.height * zoom
+
+        let dx = contentW < visible.width ? (visible.width - contentW) / 2 : 0
+        let dy = contentH < visible.height ? (visible.height - contentH) / 2 : 0
+        let target = CGPoint(x: dx + contentW / 2, y: dy + contentH / 2)
+
+        guard screenView.center != target else { return }
+        if animated {
+            UIView.animate(withDuration: 0.2) { self.screenView.center = target }
+        } else {
+            screenView.center = target
         }
     }
 
@@ -365,9 +500,13 @@ final class RDPViewController: UIViewController {
         bridge.sendMouseButton(button, down: false, x: UInt(point.x), y: UInt(point.y))
     }
 
-    private func sendMoveThrottled(_ point: CGPoint) {
+    /// 节流发送光标位置：约 60Hz 上限，避免拖动时把事件队列灌满。
+    /// force=true 时无视节流（手势结束必须补发最终位置，否则光标会停在半路）。
+    private func sendMoveThrottled(_ point: CGPoint, force: Bool = false) {
         let now = CACurrentMediaTime()
-        guard now - lastMoveSentAt >= 0.016 else { return }
+        if !force {
+            guard now - lastMoveSentAt >= 0.016 else { return }
+        }
         lastMoveSentAt = now
         bridge.sendMouseMoveAtX(UInt(point.x), y: UInt(point.y))
     }
@@ -426,30 +565,41 @@ final class RDPViewController: UIViewController {
         case .changed:
             sendMoveThrottled(point)
         case .ended, .cancelled:
+            // 抬起前把最终位置补发一次，再做右键抬起：保证右键落在手指松开的位置
+            sendMoveThrottled(point, force: true)
             bridge.sendMouseButton(.right, down: false, x: UInt(point.x), y: UInt(point.y))
         default:
             break
         }
     }
 
-    /// 单指拖动：mouse 模式移动光标，pan 模式平移视口
+    /// 单指拖动：mouse 模式移动远程光标，pan 模式平移视口
     @objc private func handleOneFingerPan(_ gesture: UIPanGestureRecognizer) {
         guard bridge.isConnected() else { return }
-        switch interactionMode {
-        case .mouse:
-            sendMoveThrottled(remotePoint(of: gesture))
-        case .pan:
-            let translation = gesture.translation(in: scrollView)
-            gesture.setTranslation(.zero, in: scrollView)
-            var offset = scrollView.contentOffset
-            offset.x = max(-scrollView.contentInset.left,
-                           min(offset.x - translation.x / scrollView.zoomScale,
-                               scrollView.contentSize.width - scrollView.bounds.width + scrollView.contentInset.right))
-            offset.y = max(-scrollView.contentInset.top,
-                           min(offset.y - translation.y / scrollView.zoomScale,
-                               scrollView.contentSize.height - scrollView.bounds.height + scrollView.contentInset.bottom))
-            scrollView.contentOffset = offset
-        }
+        guard interactionMode == .mouse else { return }
+        // 手势结束时补发最终位置，否则节流会把「最后一段」丢掉，光标停在半路
+        let isFinal = (gesture.state == .ended || gesture.state == .cancelled)
+        sendMoveThrottled(remotePoint(of: gesture), force: isFinal)
+    }
+
+    /// 三指拖动 / pan 模式单指拖动：平移本地视口（滚动由 UIScrollView 自己处理）
+    @objc private func handleThreeFingerPan(_ gesture: UIPanGestureRecognizer) {
+        panViewport(by: gesture.translation(in: scrollView))
+        gesture.setTranslation(.zero, in: scrollView)
+    }
+
+    /// 按像素平移视口，边界以 contentSize 计算
+    private func panViewport(by translation: CGPoint) {
+        let zoom = scrollView.zoomScale
+        guard zoom > 0 else { return }
+        // 居中时 screenView.center 右移了 inset/2，那一半也属于可滚动范围
+        //（contentInset 恒为 0，不能再用它算边界）。
+        let maxX = max(0, scrollView.contentSize.width - scrollView.bounds.width)
+        let maxY = max(0, scrollView.contentSize.height - scrollView.bounds.height)
+        var offset = scrollView.contentOffset
+        offset.x = min(max(0, offset.x - translation.x / zoom), maxX)
+        offset.y = min(max(0, offset.y - translation.y / zoom), maxY)
+        scrollView.contentOffset = offset
     }
 
     /// 双指拖动 = 远程滚轮（自然方向：内容跟随手指）
@@ -467,6 +617,26 @@ final class RDPViewController: UIViewController {
     }
 }
 
+// MARK: - UIGestureRecognizerDelegate（并行识别）
+
+extension RDPViewController: UIGestureRecognizerDelegate {
+    /// 允许单指/双指拖动与 UIScrollView 自带的 pinch 同时识别。
+    /// 默认行为下两者互斥，稍有一点方向偏移就会被 pinch 抢占，
+    /// 表现为光标移动/滚轮「时灵时不灵」。
+    func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer,
+                           shouldRecognizeSimultaneouslyWith other: UIGestureRecognizer) -> Bool {
+        let mine: [UIGestureRecognizer] = [oneFingerPanRef, twoFingerPanRef].compactMap { $0 }
+        return mine.contains(gestureRecognizer) || mine.contains(other)
+    }
+
+    /// 点击类手势不因其它手势识别而被阻止，保证单击始终能送到远程桌面。
+    /// 单指拖动一旦触发，点击会自然失败（这是期望行为：拖动 ≠ 点击）。
+    func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer,
+                           shouldBeRequiredToFailBy other: UIGestureRecognizer) -> Bool {
+        false
+    }
+}
+
 // MARK: - UIScrollViewDelegate
 
 extension RDPViewController: UIScrollViewDelegate {
@@ -475,7 +645,18 @@ extension RDPViewController: UIScrollViewDelegate {
     }
 
     func scrollViewDidZoom(_ scrollView: UIScrollView) {
-        centerContent()
+        // 捏合缩放过程中同步居中；viewDidLayoutSubviews 不一定会被触发
+        centerContent(animated: false)
+    }
+
+    func scrollViewDidScroll(_ scrollView: UIScrollView) {
+        // 滚动（含惯性）时 contentOffset 被系统改写；画面小于视口时补回居中
+        guard scrollView.zoomScale > 0 else { return }
+        let contentW = desktopSize.width * scrollView.zoomScale
+        let contentH = desktopSize.height * scrollView.zoomScale
+        if contentW <= scrollView.bounds.width + 0.5 || contentH <= scrollView.bounds.height + 0.5 {
+            centerContent(animated: false)
+        }
     }
 }
 

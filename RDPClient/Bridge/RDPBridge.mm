@@ -200,8 +200,10 @@ static NSString *bridge_run_context_diag(void)
         }
 
         // 4c. 系统随机源直测（区分「OpenSSL 层坏」还是「系统层坏」）
-        // 注：getentropy 在 iOS SDK 的 tbd 导出表中不存在，无法链接，
-        // 改用 /dev/urandom 直读验证系统随机源。
+        // 注1：getentropy 在 iOS SDK 的 tbd 导出表中不存在，无法链接，
+        //      改用 /dev/urandom 直读验证系统随机源。
+        // 注2：iOS 沙盒禁止直接 open /dev/urandom（EPERM），此探针失败
+        //      并不代表随机源有问题，仅供参考，不能作为失败依据。
         {
             int fd = open("/dev/urandom", O_RDONLY);
             if (fd >= 0)
@@ -212,7 +214,7 @@ static NSString *bridge_run_context_diag(void)
             }
             else
             {
-                [d appendFormat:@"urandom:OPEN_FAIL(errno=%d) ", errno];
+                [d appendFormat:@"urandom:sandbox-blocked(errno=%d) ", errno];
             }
         }
 
@@ -265,6 +267,12 @@ struct BridgeContext
 
     CFAbsoluteTime lastFrameTime = 0.0;
 
+    // 最新帧暂存：EndPaint 线程写入（覆盖旧帧），主线程经 takePendingFrame 取走。
+    // 相比每帧 dispatch_async 到主线程：主线程队列不会堆积，
+    // 连续快速帧自动合并，主线程永远只渲染最新画面。
+    os_unfair_lock frameLock = OS_UNFAIR_LOCK_INIT;
+    CGImageRef pendingImage = nullptr;
+
     __strong RDPBridge *bridge = nil; // ARC 管理强引用
 
     ~BridgeContext()
@@ -294,7 +302,7 @@ static BOOL bridge_post_connect(freerdp *instance);
 @end
 
 // ---------------------------------------------------------------------------
-// 帧推送：GDI primary buffer -> CGImage -> 主线程
+// 帧推送：GDI primary buffer -> CGImage -> 暂存 pending（主线程拉取渲染）
 // ---------------------------------------------------------------------------
 static void PushFrame(BridgeContext *bc)
 {
@@ -302,14 +310,24 @@ static void PushFrame(BridgeContext *bc)
         return;
 
     RDPBridge *bridge = bc->bridge;
-    if (!bridge || !bridge.frameHandler)
+    if (!bridge)
         return;
 
-    // 节流：约 30 FPS
+    // 生成上限约 30 FPS；被跳过的中间帧无需处理（下次 EndPaint 会再推最新画面）
     CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
     if (bc->lastFrameTime > 0 && (now - bc->lastFrameTime) < 0.033)
         return;
-    bc->lastFrameTime = now;
+
+    // 主线程还没来得及取走上一帧时直接放弃本次：
+    // 帧本身会被丢掉，但省掉一次「拷贝 + CGImageCreate」——
+    // 这部分开销远大于比较，是卡顿的主要来源。
+    if (os_unfair_lock_trylock(&bc->frameLock))
+    {
+        const BOOL busy = (bc->pendingImage != nullptr);
+        os_unfair_lock_unlock(&bc->frameLock);
+        if (busy)
+            return;
+    }
 
     rdpGdi *gdi = bc->context->gdi;
     const NSUInteger width = (NSUInteger)gdi->width;
@@ -343,13 +361,16 @@ static void PushFrame(BridgeContext *bc)
     if (!image)
         return;
 
-    CGImageRef retained = (CGImageRef)CFRetain(image);
-    CGImageRelease(image);
+    // 存入 pending：只保留最新一帧，主线程按自己的节奏（CADisplayLink）取走渲染。
+    // 这一改动消除「每帧 dispatch_async」导致的主线程队列堆积——
+    // 之前 30fps × 11MB 的块会把主线程塞满，帧延迟越积越大，表现为画面刷新严重滞后。
+    os_unfair_lock_lock(&bc->frameLock);
+    if (bc->pendingImage)
+        CGImageRelease(bc->pendingImage);
+    bc->pendingImage = image; // 转移所有权
+    os_unfair_lock_unlock(&bc->frameLock);
 
-    dispatch_async(dispatch_get_main_queue(), ^{
-        bridge.frameHandler(retained);
-        CGImageRelease(retained);
-    });
+    bc->lastFrameTime = now;
 }
 
 // ---------------------------------------------------------------------------
@@ -517,6 +538,19 @@ static BOOL bridge_authenticate_ex(freerdp *instance, char **username, char **pa
 - (void)setDesktopSize:(CGSize)size
 {
     _desktopSize = size;
+}
+
+/// 取走暂存的最新帧（主线程渲染循环调用；返回后调用方负责 CGImageRelease）。
+/// 无新帧时返回 NULL。连续帧在桥接层已自动合并，主线程永远拿到最新画面。
+- (nullable CGImageRef)takePendingFrame
+{
+    if (!_ctx)
+        return nullptr;
+    os_unfair_lock_lock(&_ctx->frameLock);
+    CGImageRef img = _ctx->pendingImage;
+    _ctx->pendingImage = nullptr;
+    os_unfair_lock_unlock(&_ctx->frameLock);
+    return img;
 }
 
 - (instancetype)init
@@ -983,6 +1017,14 @@ static BOOL bridge_authenticate_ex(freerdp *instance, char **username, char **pa
         _ctx->instance = nullptr;
         _ctx->context = nullptr;
     }
+    // 清掉暂存帧（teardown 可能发生在主线程拉取循环仍在跑的时候）
+    os_unfair_lock_lock(&_ctx->frameLock);
+    if (_ctx->pendingImage)
+    {
+        CGImageRelease(_ctx->pendingImage);
+        _ctx->pendingImage = nullptr;
+    }
+    os_unfair_lock_unlock(&_ctx->frameLock);
     delete _ctx;
     _ctx = nullptr;
     _thread = nil;
