@@ -314,17 +314,17 @@ static void PushFrame(BridgeContext *bc)
     if (!bridge)
         return;
 
-    // 生成上限约 30 FPS；被跳过的中间帧无需处理（下次 EndPaint 会再推最新画面）
+    // 生成上限约 60 FPS；被跳过的中间帧无需处理（下次 EndPaint 会再推最新画面）
     CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
-    if (bc->lastFrameTime > 0 && (now - bc->lastFrameTime) < 0.033)
+    if (bc->lastFrameTime > 0 && (now - bc->lastFrameTime) < 0.016)
         return;
 
-    // 主线程还没来得及取走上一帧时直接放弃本次：
-    // 帧本身会被丢掉，但省掉一次「拷贝 + CGImageCreate」——
-    // 这部分开销远大于比较，是卡顿的主要来源。
+    // 主线程还没来得及取走上一帧时跳过本次（省一次拷贝+CGImageCreate），
+    // 但积压超过 100ms 时强制生成一帧：保证主线程再慢画面也至少 10 FPS 前进，
+    // 避免登录动画等连续大量更新期间被无限跳帧卡住。
     if (os_unfair_lock_trylock(&bc->frameLock))
     {
-        const BOOL busy = (bc->pendingImage != nullptr);
+        const BOOL busy = (bc->pendingImage != nullptr) && (now - bc->lastFrameTime) < 0.1;
         os_unfair_lock_unlock(&bc->frameLock);
         if (busy)
             return;
@@ -602,8 +602,10 @@ static BOOL bridge_authenticate_ex(freerdp *instance, char **username, char **pa
         @"username" : username,
         @"password" : password ?: @"",
         @"domain" : domain ?: @"",
-        @"width" : @(MAX(width, 640)),
-        @"height" : @(MAX(height, 480)),
+        // 下限 320x240：手机逻辑宽约 320~440，下限过高会破坏
+        // 「桌面比例 = 可见区域比例」的等比铺满（如 390 被抬到 640）
+        @"width" : @(MAX(width, 320)),
+        @"height" : @(MAX(height, 240)),
     };
 
     [self setState:RDPBridgeStateConnecting message:nil];
@@ -923,6 +925,10 @@ static BOOL bridge_authenticate_ex(freerdp *instance, char **username, char **pa
         BRIDGE_SET(freerdp_settings_set_bool(settings, FreeRDP_AudioCapture, FALSE));
         BRIDGE_SET(freerdp_settings_set_bool(settings, FreeRDP_AllowFontSmoothing, TRUE));
         BRIDGE_SET(freerdp_settings_set_uint32(settings, FreeRDP_KeyboardLayout, 0x0409)); // en-US
+        // 声明支持自动重连：服务器把断开处理为「会话保留」而非等待超时，
+        // 后续重新登录时对同一用户会话的接管更干净（避免死连接占住会话
+        // 导致再次连接黑屏、甚至拖垮本机控制台）
+        BRIDGE_SET(freerdp_settings_set_bool(settings, FreeRDP_AutoReconnectionEnabled, TRUE));
 #undef BRIDGE_SET
 
         // ---- 安全层策略 ----
@@ -1094,9 +1100,13 @@ static BOOL bridge_authenticate_ex(freerdp *instance, char **username, char **pa
     rdpInput *input = [self input];
     if (!input)
         return;
-    UINT16 flags = PTR_FLAGS_MOVE;
-    if (down)
-        flags |= PTR_FLAGS_DOWN;
+    // 注意：按键事件只带 BUTTON 位（+DOWN），绝不带 PTR_FLAGS_MOVE。
+    // 标准客户端（xfreerdp / mstsc）的按键事件就是 BUTTON|DOWN 组合；
+    // 混入 MOVE 位会让 Windows 把事件按移动处理，双击判定与右键都会失效。
+    // 官方文档示例：
+    //   按下: PTR_FLAGS_BUTTON1 | PTR_FLAGS_DOWN
+    //   抬起: PTR_FLAGS_BUTTON1
+    UINT16 flags = down ? PTR_FLAGS_DOWN : 0;
     switch (button)
     {
     case RDPMouseButtonLeft:

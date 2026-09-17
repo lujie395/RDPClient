@@ -119,10 +119,12 @@ struct RemoteScreenView: View {
         ZStack {
             Color.black.ignoresSafeArea()
 
+            // 不加 ignoresSafeArea：让视图避让顶部导航栏与底部控制条，
+            // 这样 RDPViewController 的 bounds 就是「实际可见区域」，
+            // 连接协商的桌面比例与可见区域一致 → 等比例缩放后正好铺满（RD Client 效果）。
             RemoteScreen(session: session, onConnected: {
                 store.markConnected(id: host.id)
             })
-            .ignoresSafeArea()
 
             statusOverlay
         }

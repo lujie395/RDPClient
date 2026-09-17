@@ -135,6 +135,14 @@ final class RDPViewController: UIViewController {
     /// 需要重新适配视口（新桌面尺寸 / 旋转后）；用户手动捏合缩放后置 false
     private var needsFit = false
 
+    /// 布局完成前收到的连接请求（等 viewDidLayoutSubviews 再发起，bounds 才准）
+    private var pendingConnection: RDPHost?
+
+    /// 当前（或最近一次）连接的主机，回前台自动重连用
+    private var currentHost: RDPHost?
+    /// 回前台重连进行中（屏蔽中间状态回调，避免 UI 闪「已断开」）
+    private var isReconnecting = false
+
     /// 帧渲染循环：每 vsync 从桥接层拉取最新帧（无新帧则跳过）
     private var displayLink: CADisplayLink?
 
@@ -154,6 +162,15 @@ final class RDPViewController: UIViewController {
         // mouse 模式下禁用 UIScrollView 自带 pan，避免与单指移动光标抢事件
         setScrollPanEnabled(interactionMode == .pan)
 
+        // iOS 挂起 App 时无法发送 RDP 断开包，TCP 变成半开的「僵尸连接」：
+        // 它会占住 Windows 的用户会话，之后重连要抢同一个会话，
+        // 轻则黑屏连不上，重则把服务端图形栈和本机控制台一起拖死。
+        // 所以回前台时一律断开重连，保证每次拿到干净的会话。
+        NotificationCenter.default.addObserver(forName: UIApplication.willEnterForegroundNotification,
+                                               object: nil, queue: .main) { [weak self] _ in
+            self?.reconnectForCleanSession()
+        }
+
         // 渲染循环随视图生命周期运行（而非随连接）。
         // 桌面尺寸变化（旋转 / DesktopResize）产生的帧不会被丢掉，
         // 连接完成后第一帧也能立刻显示。
@@ -163,6 +180,11 @@ final class RDPViewController: UIViewController {
     override func viewDidAppear(_ animated: Bool) {
         super.viewDidAppear(animated)
         startRenderLoop()
+        // 兜底：若布局轮次都早于连接请求，这里 bounds 已就绪，补发
+        if let host = pendingConnection, view.bounds.width > 10, view.bounds.height > 10 {
+            pendingConnection = nil
+            startConnection(to: host)
+        }
     }
 
     override func viewDidLayoutSubviews() {
@@ -170,7 +192,14 @@ final class RDPViewController: UIViewController {
         // 布局回调统一处理：初始布局、旋转、safeArea 变化都会走到这里。
         // 缩放本身不能触发 fitAndCenter（会导致「每转一次缩小一次」的累积），
         // 只有 needsFit 置位时才重新适配。
-        guard desktopSize != .zero else { return }
+        guard desktopSize != .zero else {
+            // 布局完成且尚无桌面：如果连接请求还在排队（等 bounds），现在发起
+            if let host = pendingConnection, view.bounds.width > 10, view.bounds.height > 10 {
+                pendingConnection = nil
+                startConnection(to: host)
+            }
+            return
+        }
         if needsFit {
             needsFit = false
             fitAndCenter()
@@ -201,8 +230,17 @@ final class RDPViewController: UIViewController {
 
     // MARK: 对外动作
 
-    /// 发起连接
+    /// 发起连接。视图尚未完成布局时挂起，待 viewDidLayoutSubviews 再真正开始。
     func startConnection(to host: RDPHost) {
+        guard view.bounds.width > 10, view.bounds.height > 10 else {
+            pendingConnection = host
+            return
+        }
+        doConnect(to: host)
+    }
+
+    private func doConnect(to host: RDPHost) {
+        currentHost = host
         guard let password = KeychainService.shared.loadPassword(account: host.passwordRef.uuidString) else {
             onStateChange?(.failed, "未找到已保存的密码，请返回主机列表重新编辑保存")
             return
@@ -211,15 +249,13 @@ final class RDPViewController: UIViewController {
         var width = host.desktopWidth
         var height = host.desktopHeight
         if width == 0 || height == 0 {
-            // 自动分辨率：跟随当前屏幕方向的逻辑分辨率。
-            // 不乘 scale —— 桌面尺寸越大，服务端编码与网络压力越大，
-            // 而手机屏幕本来就小，逻辑分辨率已经足够清晰。
-            // 用 windowScene.screen（而非已废弃的 UIScreen.main）拿方向敏感的尺寸：
-            // 竖屏时 bounds 高 > 宽，横屏时已自动交换。
-            let screen = view.window?.windowScene?.screen ?? UIScreen.main
-            let pts = screen.bounds.size
-            width = min(UInt32(max(640, Int(pts.width.rounded()))), 2560)
-            height = min(UInt32(max(480, Int(pts.height.rounded()))), 1600)
+            // 自动分辨率：按「实际可见区域」的逻辑尺寸协商。
+            // view.bounds 已避让导航栏/控制条（RemoteScreenView 未用 ignoresSafeArea），
+            // 桌面比例与可见区域一致 → 等比例缩放后正好铺满屏幕（RD Client 效果）。
+            // 注意必须在布局完成后才走到这里，bounds 才是准确值。
+            let visible = view.bounds.size
+            width = min(UInt32(max(640, Int(visible.width.rounded()))), 2560)
+            height = min(UInt32(max(480, Int(visible.height.rounded()))), 1600)
         }
 
         do {
@@ -373,10 +409,32 @@ final class RDPViewController: UIViewController {
 
     private func setupBridgeCallbacks() {
         bridge.stateHandler = { [weak self] state, message in
-            self?.onStateChange?(state, message)
+            // 重连窗口期屏蔽中间状态（断开→连接中之间的闪烁），只透传结果
+            if let self, !self.isReconnecting {
+                self.onStateChange?(state, message)
+            } else if state == .failed || state == .connected {
+                self?.onStateChange?(state, message)
+            }
         }
         bridge.resizeHandler = { [weak self] size in
             self?.configureDesktop(size)
+        }
+    }
+
+    /// 回前台：上一次连接的 TCP 大概率已被 iOS 挂起杀死（僵尸连接）。
+    /// 主动断开并重连，避免僵尸会话占住 Windows 端导致黑屏/服务端卡顿。
+    /// 「连接中」状态不打断（连接线程仍在正常推进，失败会自然报错）。
+    private func reconnectForCleanSession() {
+        guard !isReconnecting, let host = currentHost else { return }
+        guard bridge.state == .connected else { return }
+        isReconnecting = true
+        bridge.disconnect()
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
+            guard let self else { return }
+            self.isReconnecting = false
+            // 等待期间用户可能已退出会话页，此时不再重连
+            guard self.viewIfLoaded?.window != nil else { return }
+            self.startConnection(to: host)
         }
     }
 
@@ -430,28 +488,22 @@ final class RDPViewController: UIViewController {
         view.layoutIfNeeded()
     }
 
-    /// 让远程画面适配当前视口：默认铺满（cover），可缩小到完整显示
+    /// 让远程画面等比例完整显示（RD Client 效果）。
+    /// 协商的桌面比例 = 可见区域比例（见 doConnect），contain 缩放后正好铺满；
+    /// 旋转后比例不再匹配时，等比例显示并留边（完整桌面优先）。
     private func fitAndCenter() {
         guard desktopSize.width > 0, desktopSize.height > 0,
               scrollView.bounds.width > 10, scrollView.bounds.height > 10 else { return }
         let boundsW = scrollView.bounds.width
         let boundsH = scrollView.bounds.height
-        // contain = 完整显示（可能留黑边）；cover = 铺满（短边对齐，长边裁切）
+        // contain：完整显示、等比例，不裁切
         let contain = min(boundsW / desktopSize.width, boundsH / desktopSize.height)
-        let cover = max(boundsW / desktopSize.width, boundsH / desktopSize.height)
         // 先更新缩放边界，再设 zoomScale（否则会被旧的 min/max 截断——
         // 这正是之前画面缩放/位置错乱的原因）
         scrollView.minimumZoomScale = contain * 0.5
-        scrollView.maximumZoomScale = max(5, cover * 8)
-        scrollView.zoomScale = cover
+        scrollView.maximumZoomScale = max(5, contain * 12)
+        scrollView.zoomScale = contain
         resetContentInset()
-        // 被裁切的方向初始显示桌面中央（任务栏等边缘内容仍可滚动查看）
-        if desktopSize.width * cover > boundsW {
-            scrollView.contentOffset.x = (desktopSize.width * cover - boundsW) / 2
-        }
-        if desktopSize.height * cover > boundsH {
-            scrollView.contentOffset.y = (desktopSize.height * cover - boundsH) / 2
-        }
         centerContent(animated: false)
     }
 
