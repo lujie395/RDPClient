@@ -151,6 +151,8 @@ final class RDPViewController: UIViewController {
         setupHiddenField()
         setupGestures()
         setupBridgeCallbacks()
+        // mouse 模式下禁用 UIScrollView 自带 pan，避免与单指移动光标抢事件
+        setScrollPanEnabled(interactionMode == .pan)
 
         // 渲染循环随视图生命周期运行（而非随连接）。
         // 桌面尺寸变化（旋转 / DesktopResize）产生的帧不会被丢掉，
@@ -295,6 +297,9 @@ final class RDPViewController: UIViewController {
 
         scrollView.addSubview(screenView)
         scrollView.addInteraction(UIPointerInteraction(delegate: self))
+        // 右键/长按入口：iOS 13+ 把外接鼠标右键与触屏长按都路由到
+        // UIContextMenuInteraction（不产生 touch），不注册就会被系统吞掉。
+        scrollView.addInteraction(UIContextMenuInteraction(delegate: self))
     }
 
     private func setupHiddenField() {
@@ -322,24 +327,13 @@ final class RDPViewController: UIViewController {
     }
 
     private func setupGestures() {
-        // UIScrollView 自带 pinch（缩放）与 pan（平移）手势。
-        // 注意：UIScrollView 一旦识别过 pinch/pan，内部的 delayed touches 机制
-        // 会让点击延迟约 150ms；而自定义手势若与它冲突，还可能整片吞掉点击。
-        // 所以这里：自带 pan 在 mouse 模式关闭（平移改由三指触发），
-        // pinch 保留给缩放，其余自定义手势只补 UIScrollView 没有的语义。
-        setScrollPanEnabled(interactionMode == .pan)
-
-        let doubleTap = UITapGestureRecognizer(target: self, action: #selector(handleDoubleTap(_:)))
-        doubleTap.numberOfTapsRequired = 2
-
+        // 双击判定不在本地做：单击立即发送，连续两次快速单击由 Windows
+        // 按自己的 GetDoubleClickTime 判定（合成双击因间隔为 0 无法触发）。
         let singleTap = UITapGestureRecognizer(target: self, action: #selector(handleSingleTap(_:)))
-        singleTap.require(toFail: doubleTap)
 
+        // 双指点按 = 右键（触屏）
         let twoFingerTap = UITapGestureRecognizer(target: self, action: #selector(handleTwoFingerTap(_:)))
         twoFingerTap.numberOfTouchesRequired = 2
-
-        let longPress = UILongPressGestureRecognizer(target: self, action: #selector(handleLongPress(_:)))
-        longPress.minimumPressDuration = 0.5
 
         // 三指平移视口：不参与 pinch 的触点数，和缩放/点击都无冲突
         let threeFingerPan = UIPanGestureRecognizer(target: self, action: #selector(handleThreeFingerPan(_:)))
@@ -360,7 +354,7 @@ final class RDPViewController: UIViewController {
         oneFingerPan.maximumNumberOfTouches = 1
         oneFingerPan.delegate = self
 
-        [doubleTap, singleTap, twoFingerTap, longPress, threeFingerPan, twoFingerPan, oneFingerPan]
+        [singleTap, twoFingerTap, threeFingerPan, twoFingerPan, oneFingerPan]
             .forEach { scrollView.addGestureRecognizer($0) }
 
         oneFingerPanRef = oneFingerPan
@@ -436,19 +430,28 @@ final class RDPViewController: UIViewController {
         view.layoutIfNeeded()
     }
 
-    /// 让远程画面完整适配当前视口并居中
+    /// 让远程画面适配当前视口：默认铺满（cover），可缩小到完整显示
     private func fitAndCenter() {
         guard desktopSize.width > 0, desktopSize.height > 0,
               scrollView.bounds.width > 10, scrollView.bounds.height > 10 else { return }
         let boundsW = scrollView.bounds.width
         let boundsH = scrollView.bounds.height
-        let fit = min(boundsW / desktopSize.width, boundsH / desktopSize.height)
+        // contain = 完整显示（可能留黑边）；cover = 铺满（短边对齐，长边裁切）
+        let contain = min(boundsW / desktopSize.width, boundsH / desktopSize.height)
+        let cover = max(boundsW / desktopSize.width, boundsH / desktopSize.height)
         // 先更新缩放边界，再设 zoomScale（否则会被旧的 min/max 截断——
         // 这正是之前画面缩放/位置错乱的原因）
-        scrollView.minimumZoomScale = fit * 0.5
-        scrollView.maximumZoomScale = max(5, fit * 8)
-        scrollView.zoomScale = fit
+        scrollView.minimumZoomScale = contain * 0.5
+        scrollView.maximumZoomScale = max(5, cover * 8)
+        scrollView.zoomScale = cover
         resetContentInset()
+        // 被裁切的方向初始显示桌面中央（任务栏等边缘内容仍可滚动查看）
+        if desktopSize.width * cover > boundsW {
+            scrollView.contentOffset.x = (desktopSize.width * cover - boundsW) / 2
+        }
+        if desktopSize.height * cover > boundsH {
+            scrollView.contentOffset.y = (desktopSize.height * cover - boundsH) / 2
+        }
         centerContent(animated: false)
     }
 
@@ -543,34 +546,9 @@ final class RDPViewController: UIViewController {
         sendClick(.left, at: remotePoint(of: gesture))
     }
 
-    @objc private func handleDoubleTap(_ gesture: UITapGestureRecognizer) {
-        guard bridge.isConnected() else { return }
-        let point = remotePoint(of: gesture)
-        sendClick(.left, at: point)
-        sendClick(.left, at: point)
-    }
-
     @objc private func handleTwoFingerTap(_ gesture: UITapGestureRecognizer) {
         guard bridge.isConnected() else { return }
         sendClick(.right, at: remotePoint(of: gesture))
-    }
-
-    /// 长按 = 右键；按住拖动 = 右键拖动
-    @objc private func handleLongPress(_ gesture: UILongPressGestureRecognizer) {
-        guard bridge.isConnected() else { return }
-        let point = remotePoint(of: gesture)
-        switch gesture.state {
-        case .began:
-            bridge.sendMouseButton(.right, down: true, x: UInt(point.x), y: UInt(point.y))
-        case .changed:
-            sendMoveThrottled(point)
-        case .ended, .cancelled:
-            // 抬起前把最终位置补发一次，再做右键抬起：保证右键落在手指松开的位置
-            sendMoveThrottled(point, force: true)
-            bridge.sendMouseButton(.right, down: false, x: UInt(point.x), y: UInt(point.y))
-        default:
-            break
-        }
     }
 
     /// 单指拖动：mouse 模式移动远程光标，pan 模式平移视口
@@ -657,6 +635,21 @@ extension RDPViewController: UIScrollViewDelegate {
         if contentW <= scrollView.bounds.width + 0.5 || contentH <= scrollView.bounds.height + 0.5 {
             centerContent(animated: false)
         }
+    }
+}
+
+// MARK: - UIContextMenuInteractionDelegate（鼠标右键 / 触屏长按）
+
+extension RDPViewController: UIContextMenuInteractionDelegate {
+    /// 外接鼠标右键按下、触屏长按到达阈值时调用。
+    /// 返回 nil 不显示系统菜单，位置转发为远程右键点击。
+    func contextMenuInteraction(_ interaction: UIContextMenuInteraction,
+                                configurationForMenuAtLocation location: CGPoint) -> UIContextMenuConfiguration? {
+        guard bridge.isConnected() else { return nil }
+        let remote = TouchInputMapper.remotePoint(from: scrollView.convert(location, to: screenView),
+                                                  desktopSize: desktopSize)
+        sendClick(.right, at: remote)
+        return nil
     }
 }
 
