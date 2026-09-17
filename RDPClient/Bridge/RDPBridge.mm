@@ -127,6 +127,10 @@ __attribute__((constructor)) static void rdpbridge_early_init(void)
     bridge_load_openssl_providers();
 }
 
+// iOS SDK 未暴露 getentropy 原型（macOS 在 <sys/random.h>，iOS 缺该头），
+// 但 libSystem 自 iOS 10 起导出该符号。手动声明仅供诊断探针使用。
+extern int getentropy(void *__buffer, size_t __length);
+
 // 分步诊断：按 freerdp_context_new 的内部依赖链逐层探测。
 // Linux 实验已证明：环境贫瘠（如 HOME 缺失）时 settings_new 会静默
 // goto out_fail（无任何日志）。这里把每一层依赖用 public API 跑一遍，
