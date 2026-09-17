@@ -46,6 +46,7 @@
 #import <errno.h>
 #import <stdlib.h>
 #import <time.h>
+#import <os/lock.h> // os_unfair_lock / OS_UNFAIR_LOCK_INIT / trylock
 #import <UIKit/UIKit.h>
 
 NSString * const RDPBridgeErrorDomain = @"RDPBridgeErrorDomain";
